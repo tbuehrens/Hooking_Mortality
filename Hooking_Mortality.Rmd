@@ -225,7 +225,7 @@ model{
 3. Cap-code 5 would indicate an "unaccounted for" control effect 
 
 
-Notes on DB:
+# Notes on DB:
 1.	Capcodes really important
   a.	Filter out capcode 0’s
   b.	Filter out wild fish
