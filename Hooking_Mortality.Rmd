@@ -33,13 +33,78 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan") 
+packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos") 
 install_or_load_pack(pack = packages_list)
 ```
 
 
 # Read and organize data
 ```{r load data, results = "hide",echo = T, message = FALSE, warning = FALSE }
+#locations from table
+location.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="Location Index", fields= "*")%>%
+  as_tibble()%>%
+  mutate(lat=ifelse(!is.na(Loc_Lat),Loc_Lat,(US_Lat + DS_Lat)/2),
+         lon=ifelse(!is.na(Loc_Lon),Loc_Lon,(US_Lon + DS_Lon)/2)
+         )%>%
+  filter(!is.na(lat))%>%
+  dplyr::select(`Location Name`,lat,lon)
+
+points.dec = SpatialPoints(cbind(location.df$lon, location.df$lat), proj4string=CRS("+proj=longlat"))
+
+#cowlitz flow line shape file
+river.sh<-st_read("WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp")
+points.plot <- data.frame(spTransform(points.dec, crs(river.sh)))%>%
+  dplyr::rename(lon=coords.x1,lat=coords.x2)
+
+#Map river with locations
+ggplot() + 
+  geom_sf(data = river.sh, size = 1, color = "black", fill = "cyan1") + 
+  ggtitle("Cowlitz River & Hooking Mortality Study Locations") + 
+  coord_sf()+
+  geom_point(data=points.plot,mapping=aes(x=lon,y=lat),color="red",size=2)
+
+river_sp<-readShapeLines(
+  fn="WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp",
+  proj4string=CRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs ")
+  , verbose=FALSE
+  ,repair=FALSE
+  ,delete_null_obj=FALSE
+  )
+
+river<-line2network(
+  sp = river_sp,
+  path = ".",
+  layer = NA,
+  tolerance = 100,
+  reproject = NULL,
+  supplyprojection = NULL
+)
+
+river_2<-setmouth(seg=354, vert=1, rivers=river)
+#showends(seg=354,rivers=river)
+
+
+points.UTM <- spTransform(points.dec, crs(river_sp))
+points<-xy2segvert(x=points.UTM$coords.x1,y=points.UTM$coords.x2,rivers=river_2)
+
+#plot(river)
+#riverpoints(seg=points$seg, vert=points$vert, rivers=river, pch=15,col="blue")
+
+RKM<-mouthdistbysurvey(
+  unique=1:dim(points)[1],
+  survey=rep(1,dim(points)[1]),
+  seg=points$seg,
+  vert=points$vert,
+  rivers = river_2,
+  logical = NULL,
+  stopiferror = TRUE,
+  algorithm = NULL
+)/1000
+
+location.df<-location.df%>%
+  bind_cols(RKM=RKM)
+
+
 # all captures
 capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="All Captures Query", fields= "*")%>%
   as_tibble()%>%
@@ -67,7 +132,7 @@ capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn
                                                                                 ifelse(as.numeric(Year=="2019")&SpeciesCode=="STLHD","2019",
                                                                                        ifelse(as.numeric(Year=="2020")&as.numeric(Month<2)&SpeciesCode=="STLHD","2019",
                                                                                               ifelse(as.numeric(Year=="2020")&as.numeric(Month>2)&SpeciesCode=="STLHD","2020",as.numeric(Year))))))))))))
-  ))
+  ))%>%left_join(location.df,by=c(Release_Location="Location Name"))
   
 #only first captures that were new fish (T or C)
 firstcapture = capture.df%>%
@@ -80,21 +145,48 @@ recapture = capture.df%>%
   arrange(Survey_Date,TimeCapture)%>%
   slice(1L) #get first data/time recapure for each fish ID
   
-#merge capture-recapture
+#merge capture-recapture & create dummy variable for recaptures
 dat<-firstcapture%>%
-  left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap")) #join first captures with first recaptures
-
-#control fish dataframe
-cdat<-dat%>%
-  filter(Treatment_cap=="Control")%>%
-  mutate(rec=ifelse(!is.na(DOY_recap),1,0)
-           )
+  left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
+  mutate(rec=ifelse(!is.na(DOY_recap),1,0))#join first captures with first recaptures
 ```
+# NOTES 
 
-# GAM analysis of factors affecting prob of recapture
-```{r GAM analysis, results="hold",echo = T, message = T, warning = FALSE }
-cdat<-cdat%>%
-  filter(SpeciesCode_cap=="COHO")%>%
+### Analysis
+
+Options for Analysis:
+1. Binomial-logit with dummy variable with dummy variable for TC
+2. Split binomial R2R
+3. Time to recovery (survival analysis)
+
+Things to explore in analysis
+1. Including Capcode as a factor variable in the treatment effects would test for an "unaccounted for" control effect; Cap-code 5 would be lower recovery rate if unaccounted effect.
+
+
+### Notes on Data and Database:
+1. Added lat/long to database for Barrier Dam (missing originally)
+2. Maybe need to exclude control Capcode 2 and 5's that were released in upper basin/brood first? 1 present in coho, several spring Chinook.
+
+* Capcodes really important
+  * Filter out capcode 0’s
+  * Filter out wild fish
+  * Capcode 5 = fish that went from control release to treatment fish
+    * Initially tags pulled and new floys put in fish
+    *	Later, fish simply release with old floys
+* Multiple recap fish
+  * Make sure to filter for initial releases and only “count” single recapture
+* Consider removint fish that aren’t available for recapture
+  * Capcode 1---look for “loss on capture” (mortality) in both treatments and controls
+  * (only 5 controls died)
+* Look for errata
+  * Example: fish that had no release record but were recovered, we created a release record
+
+
+
+# GAM analysis of factors affecting prob of recapture for control Coho
+```{r GAM analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO" & Treatment_cap=="Control")%>%
   dplyr::select(
     rec,
     Fish_ID,
@@ -102,16 +194,16 @@ cdat<-cdat%>%
     DOY_cap,
     Temp_C_cap,
     Release_Location_cap,
-    Capture_Location_recap
+    Capture_Location_recap,
+    survey_ID_cap
                 )%>%
   mutate(run_year_cap = factor(run_year_cap))
 
 m1<-gam(rec ~ 
           1
           + s(run_year_cap,bs="re") 
-          + s(DOY_cap,bs="ps",k=30,m=1)
-          + s(DOY_cap,run_year_cap,bs="fs",k=20,m=1)
-          #+ s(Temp_C_cap,m=1)
+          + s(DOY_cap,by=run_year_cap,k=20,m=1)
+          + s(survey_ID_cap,bs="re",m=1)
           ,family = binomial(link="logit")
           ,data=cdat
     )
@@ -126,10 +218,16 @@ cat("\\end{verbatim}")
 
 newdat<-expand.grid(
   DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
-  run_year_cap = unique(cdat$run_year_cap)
+  run_year_cap = unique(cdat$run_year_cap),
+  survey_ID_cap = 0
   )%>%
-  as_tibble()%>%
-  add_predictions(model=m1,var="preds",type = "response")
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
 
 ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
   geom_line(size=0.8)+
@@ -138,6 +236,188 @@ ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
   theme_bw()
 ```
 
+# GAM analysis of factors affecting prob of recapture for Summer Steelhead
+```{r GAM analysis S Steelhead, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="STLHD" & Treatment_cap=="Control")%>%
+  dplyr::select(
+    rec,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    RKM_cap,
+    Capture_Location_recap,
+    survey_ID_cap
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap))
+
+m1<-gam(rec ~ 
+          1
+          + s(run_year_cap,bs="re") 
+          + s(DOY_cap,by=run_year_cap,bs="ps",k=5,m=1)
+          + s(RKM_cap,by=run_year_cap,bs="ps",k=3,m=1)
+          + ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
+          + s(survey_ID_cap,bs="re",m=1) 
+          + RKM_cap
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+cat("\\begin{verbatim}")
+cat(print("Summary GAM results for probability of recapture for control coho"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+try(cat(print(gam.check(m1)),silent = T))
+cat("\\end{verbatim}")
+
+
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  RKM_cap = unique(cdat$RKM_cap),
+  survey_ID_cap = 0
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=factor(RKM_cap)))+
+  geom_line(size=0.8)+
+  facet_wrap(~run_year_cap,ncol=1)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+```
+# GAM analysis of factors affecting prob of recapture for Winter Steelhead
+
+NOTE: analysis NOT final...still lack of fit for tensor product interaction term...need to examine residuals...steelhead data funky as expected...possibly filter recovery locations to separator.
+```{r GAM analysis W Steelhead, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap=="Control")%>%
+  dplyr::select(
+    rec,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    RKM_cap,
+    Capture_Location_recap,
+    survey_ID_cap
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap))
+
+m1<-gam(rec ~ 
+          1
+          + s(run_year_cap,bs="re")
+          + s(DOY_cap,by=run_year_cap,bs="ps",k=10,m=1)
+          + s(RKM_cap,by=run_year_cap,bs="ps",k=3,m=1)
+          + ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=12,m=2)
+          + s(survey_ID_cap,bs="re",m=1)
+          + RKM_cap
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+cat("\\begin{verbatim}")
+cat(print("Summary GAM results for probability of recapture for control coho"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+try(cat(print(gam.check(m1)),silent = T))
+cat("\\end{verbatim}")
+
+
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  RKM_cap = unique(cdat$RKM_cap),
+  survey_ID_cap = 0
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=factor(RKM_cap)))+
+  geom_line(size=0.8)+
+  facet_wrap(~run_year_cap,ncol=1)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+```
+
+# GAM analysis of factors affecting prob of recapture for spring Chinook
+
+ONLY use 2018 controls, exlcude all but barrier dam (which means this applies to angled fish too)
+```{r GAM analysis SPCK, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="SCHK" & Treatment_cap=="Control" & Release_Location_cap == "Barrier Dam Launch")%>%
+  dplyr::select(
+    rec,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    RKM_cap,
+    Capture_Location_recap,
+    survey_ID_cap
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap))
+
+m1<-gam(rec ~ 
+          1
+          #+ s(run_year_cap,bs="re")
+          + s(DOY_cap,bs="ps",k=10,m=1)
+          #+ s(RKM_cap,by=run_year_cap,bs="ps",k=3,m=1)
+          #+ ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=12,m=2)
+          + s(survey_ID_cap,bs="re",m=1)
+          #+ RKM_cap
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+cat("\\begin{verbatim}")
+cat(print("Summary GAM results for probability of recapture for control coho"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+try(cat(print(gam.check(m1)),silent = T))
+cat("\\end{verbatim}")
+
+
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  RKM_cap = unique(cdat$RKM_cap),
+  survey_ID_cap = 0
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=factor(RKM_cap)))+
+  geom_line(size=0.8)+
+  facet_wrap(~run_year_cap,ncol=1)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+```
 
 # Simulation GLM for dummy variable survival analysis
 ```{r simulated data model check, results="hold",echo = T, message = T, warning = FALSE }
@@ -189,54 +469,9 @@ cat("\\end{verbatim}")
 ```
 
 # A stan model for fitting R2R models with no covariates
-```{stan output.var="model"}
-
-data{
-  int n;//number of observations (fish)
-  int rec[n]; //bernoulli variable indicating if an individual recovered
-  int TC[n]; //dummy variable indicating if an individual is a T or C
-}
-parameters{
-  real<lower=0,upper=1> p[2];
-}
-transformed parameters{
-  //logit(p[i]) =
-}
-model{
-  //priors
-  p ~ beta(1,1);
-  //likelihoods
-  for(i in 1:n){
-    if(TC[i]==1){
-      rec[i] ~ bernoulli(p[1]);
-    }else{
-      rec[i] ~ bernoulli(p[1]*p[2]);
-    }
-  }
-}
-
+```{r }
+processFile(file.path("stan_models", "R2R.stan"))
 ```
 
-# Notes on Analysis
-1. Time to recovery (survival analysis)
-2. Binomial-logit with dummy variable with dummy variable for TC
-3. Split binomial R2R
-4. Exploratory analysis
-3. Cap-code 5 would indicate an "unaccounted for" control effect 
 
-
-# Notes on DB:
-1.	Capcodes really important
-  a.	Filter out capcode 0’s
-  b.	Filter out wild fish
-  c.	Capcode 5 = fish that went from control release to treatment fish
-    i.	Initially tags pulled and new floys put in fish
-    ii.	Later, fish simply release with old floys
-2.	Multiple recap fish
-  a.	Make sure to filter for initial releases and only “count” single recapture
-3.	Remove fish that aren’t available for recapture
-  a.	Capcode 1---look for “loss on capture” (mortality) in both treatments and controls
-  i.	(only 5 controls died)
-4.	Look for errata
-  a.	Example: fish that had no release record but were recovered, we created a release record
 
