@@ -181,6 +181,10 @@ Things to explore in analysis
 * Look for errata
   * Example: fish that had no release record but were recovered, we created a release record
 
+### Thomas Musing's on analysis
+
+* For coho and spring chinook, it’s relatively trivial…we basically have day of year and year (year only for coho) that can affect recovery rates, because we released basically all the controls at barrier pool…nice simple clean study design with not *too many* possible competing models
+* For steelhead, we released controls at multiple locations AND the hatchery (where fish presumably home) is not adjacent to the principle recovery location (separator). We have to at least consider trying to account for year effects, day of year effects, river kilometer of release effects, and possible 2- and 3-way interactions. Since many of these are expected to be non-linear, I used splines. When you add the number of candidate models with just combinations of main effects and interactions it is a lot of models. Then you can consider the spline hyperparameters (basis function type, number of knots, penalty order) and the number of candidate models is huge. I can up with an approach that simplifies this a bit by basically factoring out year (using “by” in spline notation), so that effects were independent by year. That said, I am still thinking on how to “simplify” the spline analysis for non-linear effects affecting capture probabilities for controls…want a defensible final model without exhaustively testing 1000’s of models (and thereby likely finding one that isn’t the best anyway!). I think my default idea is to basically fit a “full” penalized model for all variables possibly affecting control recoveries, knowing not all variables may be “significant” but by penalizing, it won’t be overfitting, and we aren’t really interested in hypothesis testing control variables anyway…just controlling for their effects.
 
 
 # GAM analysis of factors affecting prob of recapture for control Coho
