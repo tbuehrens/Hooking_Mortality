@@ -3,5 +3,8 @@
 .RData
 .Ruserdata
 .accdb
+.zip
 CowlitzEnvironmenalConditionsDB.accdb
 CowlitzHookingMortalityDB.accdb
+CowlitzHookingMortalityDB.laccdb
+WA_Hydrography_-_NHD_Flowline
