@@ -33,8 +33,10 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos") 
+packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
 install_or_load_pack(pack = packages_list)
+remove.packages("rstanarm")
+install_github("stan-dev/rstanarm")
 ```
 
 
@@ -278,7 +280,10 @@ summary(fGAM)
 par(mfrow=c(2,1))
 plot(fGAM,main="Gauss Lobatto (20)",ylab="log-basehaz")
 plot(fGAM,main="Gauss Lobatto (5)",ylab="basehaz",trans=exp)
-next: https://statmd.wordpress.com/2015/05/03/survival-analysis-with-generalized-additive-models-part-iv-the-survival-function/
+#next: https://statmd.wordpress.com/2015/05/03/survival-analysis-with-generalized-additive-models-part-iv-the-survival-function/
+
+#using stan
+
 ```
 
 # GAM analysis of factors affecting prob of recapture for Summer Steelhead
