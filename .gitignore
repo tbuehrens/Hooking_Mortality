@@ -4,6 +4,7 @@
 .Ruserdata
 .accdb
 .zip
+/misc
 CowlitzEnvironmenalConditionsDB.accdb
 CowlitzHookingMortalityDB.accdb
 CowlitzHookingMortalityDB.laccdb
