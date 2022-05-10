@@ -148,7 +148,9 @@ recapture = capture.df%>%
 #merge capture-recapture & create dummy variable for recaptures
 dat<-firstcapture%>%
   left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
-  mutate(rec=ifelse(!is.na(DOY_recap),1,0))#join first captures with first recaptures
+  mutate(rec=ifelse(!is.na(DOY_recap),1,0),
+         time = round(julian(Survey_Date_recap)-julian(Survey_Date_cap))
+         )#join first captures with first recaptures
 ```
 # NOTES 
 
@@ -186,13 +188,33 @@ Things to explore in analysis
 * For coho and spring chinook, it’s relatively trivial…we basically have day of year and year (year only for coho) that can affect recovery rates, because we released basically all the controls at barrier pool…nice simple clean study design with not *too many* possible competing models
 * For steelhead, we released controls at multiple locations AND the hatchery (where fish presumably home) is not adjacent to the principle recovery location (separator). We have to at least consider trying to account for year effects, day of year effects, river kilometer of release effects, and possible 2- and 3-way interactions. Since many of these are expected to be non-linear, I used splines. When you add the number of candidate models with just combinations of main effects and interactions it is a lot of models. Then you can consider the spline hyperparameters (basis function type, number of knots, penalty order) and the number of candidate models is huge. I can up with an approach that simplifies this a bit by basically factoring out year (using “by” in spline notation), so that effects were independent by year. That said, I am still thinking on how to “simplify” the spline analysis for non-linear effects affecting capture probabilities for controls…want a defensible final model without exhaustively testing 1000’s of models (and thereby likely finding one that isn’t the best anyway!). I think my default idea is to basically fit a “full” penalized model for all variables possibly affecting control recoveries, knowing not all variables may be “significant” but by penalizing, it won’t be overfitting, and we aren’t really interested in hypothesis testing control variables anyway…just controlling for their effects.
 
+### Notes from 12/10/2021
+•	Ben Locations
+•	Thomas-Mark
+    Meet to talk about survival models
+    Bathtub curve survival models--machine parts (quick wear and then)
+    Thomas with help simplify control and mabe treatment for coho
+      Check effect on controls:
+      •	Length
+      •	sex effect 
+      •	fish condition
+      maybe beta-binomial
+      2018 coho
+      •	Did barrier pool close?
+      S. Steelhead
+      •	Drop by run_year in following term: ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
+
 
 # GAM analysis of factors affecting prob of recapture for control Coho
 ```{r GAM analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
 cdat<-dat%>%
-  filter(SpeciesCode_cap=="COHO" & Treatment_cap=="Control")%>%
+  filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
   dplyr::select(
     rec,
+    time,
+    Treatment_cap,
     Fish_ID,
     run_year_cap,
     DOY_cap,
@@ -238,6 +260,25 @@ ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
   ylim(0,1)+
   ylab("Predicted Probability of Recapture")+
   theme_bw()
+
+
+
+#try survival analysis
+
+GL<-GaussLobatto(20)
+cdat2<-GAMSurvdataset(GL,data.frame(cdat),which(colnames(cdat)=="time"),which(colnames(cdat)=="rec"))
+
+fGAM<-gam(gam.ev~
+            s(stop,bs="cr")+
+            as.factor(Treatment_cap)+
+            offset(log(gam.dur)),
+          data=cdat2,family="poisson",scale=1,method="REML")
+
+summary(fGAM)
+par(mfrow=c(2,1))
+plot(fGAM,main="Gauss Lobatto (20)",ylab="log-basehaz")
+plot(fGAM,main="Gauss Lobatto (5)",ylab="basehaz",trans=exp)
+next: https://statmd.wordpress.com/2015/05/03/survival-analysis-with-generalized-additive-models-part-iv-the-survival-function/
 ```
 
 # GAM analysis of factors affecting prob of recapture for Summer Steelhead
