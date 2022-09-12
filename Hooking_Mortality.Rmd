@@ -35,124 +35,130 @@ This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
 packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
 install_or_load_pack(pack = packages_list)
-remove.packages("rstanarm")
-install_github("stan-dev/rstanarm")
+# remove.packages("rstanarm")
+# install_github("stan-dev/rstanarm")
 ```
 
 
 # Read and organize data
 ```{r load data, results = "hide",echo = T, message = FALSE, warning = FALSE }
-#locations from table
-location.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="Location Index", fields= "*")%>%
-  as_tibble()%>%
-  mutate(lat=ifelse(!is.na(Loc_Lat),Loc_Lat,(US_Lat + DS_Lat)/2),
-         lon=ifelse(!is.na(Loc_Lon),Loc_Lon,(US_Lon + DS_Lon)/2)
-         )%>%
-  filter(!is.na(lat))%>%
-  dplyr::select(`Location Name`,lat,lon)
-
-points.dec = SpatialPoints(cbind(location.df$lon, location.df$lat), proj4string=CRS("+proj=longlat"))
-
-#cowlitz flow line shape file
-river.sh<-st_read("WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp")
-points.plot <- data.frame(spTransform(points.dec, crs(river.sh)))%>%
-  dplyr::rename(lon=coords.x1,lat=coords.x2)
-
-#Map river with locations
-ggplot() + 
-  geom_sf(data = river.sh, size = 1, color = "black", fill = "cyan1") + 
-  ggtitle("Cowlitz River & Hooking Mortality Study Locations") + 
-  coord_sf()+
-  geom_point(data=points.plot,mapping=aes(x=lon,y=lat),color="red",size=2)
-
-river_sp<-readShapeLines(
-  fn="WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp",
-  proj4string=CRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs ")
-  , verbose=FALSE
-  ,repair=FALSE
-  ,delete_null_obj=FALSE
+#only read data from DB if not already in data.rds
+if(!file.exists("data.rds")){
+  #locations from table
+  location.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="Location Index", fields= "*")%>%
+    as_tibble()%>%
+    mutate(lat=ifelse(!is.na(Loc_Lat),Loc_Lat,(US_Lat + DS_Lat)/2),
+           lon=ifelse(!is.na(Loc_Lon),Loc_Lon,(US_Lon + DS_Lon)/2)
+           )%>%
+    filter(!is.na(lat))%>%
+    dplyr::select(`Location Name`,lat,lon)
+  
+  points.dec = SpatialPoints(cbind(location.df$lon, location.df$lat), proj4string=CRS("+proj=longlat"))
+  
+  #cowlitz flow line shape file
+  river.sh<-st_read("WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp")
+  points.plot <- data.frame(spTransform(points.dec, crs(river.sh)))%>%
+    dplyr::rename(lon=coords.x1,lat=coords.x2)
+  
+  #Map river with locations
+  ggplot() + 
+    geom_sf(data = river.sh, size = 1, color = "black", fill = "cyan1") + 
+    ggtitle("Cowlitz River & Hooking Mortality Study Locations") + 
+    coord_sf()+
+    geom_point(data=points.plot,mapping=aes(x=lon,y=lat),color="red",size=2)
+  
+  river_sp<-readShapeLines(
+    fn="WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp",
+    proj4string=CRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs ")
+    , verbose=FALSE
+    ,repair=FALSE
+    ,delete_null_obj=FALSE
+    )
+  
+  river<-line2network(
+    sp = river_sp,
+    path = ".",
+    layer = NA,
+    tolerance = 100,
+    reproject = NULL,
+    supplyprojection = NULL
   )
-
-river<-line2network(
-  sp = river_sp,
-  path = ".",
-  layer = NA,
-  tolerance = 100,
-  reproject = NULL,
-  supplyprojection = NULL
-)
-
-river_2<-setmouth(seg=354, vert=1, rivers=river)
-#showends(seg=354,rivers=river)
-
-
-points.UTM <- spTransform(points.dec, crs(river_sp))
-points<-xy2segvert(x=points.UTM$coords.x1,y=points.UTM$coords.x2,rivers=river_2)
-
-#plot(river)
-#riverpoints(seg=points$seg, vert=points$vert, rivers=river, pch=15,col="blue")
-
-RKM<-mouthdistbysurvey(
-  unique=1:dim(points)[1],
-  survey=rep(1,dim(points)[1]),
-  seg=points$seg,
-  vert=points$vert,
-  rivers = river_2,
-  logical = NULL,
-  stopiferror = TRUE,
-  algorithm = NULL
-)/1000
-
-location.df<-location.df%>%
-  bind_cols(RKM=RKM)
-
-
-# all captures
-capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="All Captures Query", fields= "*")%>%
-  as_tibble()%>%
-  mutate(
-    Year = as.numeric(year(ymd(as.character(Survey_Date)))),
-    Month = as.numeric(month(ymd(as.character(Survey_Date)))),
-    jdate = as.numeric(julian(ymd(as.character(Survey_Date)))),
-    DOY = as.numeric(yday(ymd(as.character(Survey_Date)))),
-    Capture_Type = ifelse(Capcode=="0", "No_Captures",
-                                 ifelse(Capcode=="1", "New_Fish",
-                                    ifelse(Capcode=="2", "Recapture",
-                                      ifelse(Capcode=="3", "Natural_Origin",
-                                        ifelse(Capcode=="5", "New_Fish","Lost"))))), #all variants of Capcode 4 were lost (we may want to differentiate for some analyses)
-     #define initial capture as a control or treatment
-    Treatment = ifelse(Survey_type%in%c("Control Release TP","Control Release MHE","Control Recycle"), "Control",
-                                ifelse(Survey_type=="Angling", "Treatment","Other")),
-    run_year = as.numeric(ifelse(as.numeric(Year=="2017")&as.numeric(Month>8)&SpeciesCode=="COHO","2017",
-                               ifelse(as.numeric(Year=="2018")&as.numeric(Month<5)&SpeciesCode=="COHO","2017",
-                                      ifelse(as.numeric(Year=="2018")&as.numeric(Month>8)&SpeciesCode=="COHO","2018",
-                                             ifelse(as.numeric(Year=="2019")&as.numeric(Month<5)&SpeciesCode=="COHO","2018",
-                                                    ifelse(as.numeric(Year=="2019")&as.numeric(Month>8)&SpeciesCode=="COHO","2019",
-                                                           ifelse(as.numeric(Year=="2020")&as.numeric(Month<5)&SpeciesCode=="COHO","2019",
-                                                                  ifelse(as.numeric(Year=="2017")&SpeciesCode=="STLHD","2017",
-                                                                         ifelse(as.numeric(Year=="2018")&SpeciesCode=="STLHD","2018",
-                                                                                ifelse(as.numeric(Year=="2019")&SpeciesCode=="STLHD","2019",
-                                                                                       ifelse(as.numeric(Year=="2020")&as.numeric(Month<2)&SpeciesCode=="STLHD","2019",
-                                                                                              ifelse(as.numeric(Year=="2020")&as.numeric(Month>2)&SpeciesCode=="STLHD","2020",as.numeric(Year))))))))))))
-  ))%>%left_join(location.df,by=c(Release_Location="Location Name"))
   
-#only first captures that were new fish (T or C)
-firstcapture = capture.df%>%
-  filter(Capcode=="1"|Capcode =="5") #these are initial captures and excludes Capcode 3s and 4s
-
-#only first recaptures
-recapture = capture.df%>%
-  filter(Capcode=="2")%>%
-  group_by(Fish_ID)%>%
-  arrange(Survey_Date,TimeCapture)%>%
-  slice(1L) #get first data/time recapure for each fish ID
+  river_2<-setmouth(seg=354, vert=1, rivers=river)
+  #showends(seg=354,rivers=river)
   
-#merge capture-recapture & create dummy variable for recaptures
-dat<-firstcapture%>%
-  left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
-  mutate(rec=ifelse(!is.na(DOY_recap),1,0),
-         time = round(julian(Survey_Date_recap)-julian(Survey_Date_cap))
-         )#join first captures with first recaptures
+  
+  points.UTM <- spTransform(points.dec, crs(river_sp))
+  points<-xy2segvert(x=points.UTM$coords.x1,y=points.UTM$coords.x2,rivers=river_2)
+  
+  #plot(river)
+  #riverpoints(seg=points$seg, vert=points$vert, rivers=river, pch=15,col="blue")
+  
+  RKM<-mouthdistbysurvey(
+    unique=1:dim(points)[1],
+    survey=rep(1,dim(points)[1]),
+    seg=points$seg,
+    vert=points$vert,
+    rivers = river_2,
+    logical = NULL,
+    stopiferror = TRUE,
+    algorithm = NULL
+  )/1000
+  
+  location.df<-location.df%>%
+    bind_cols(RKM=RKM)
+  
+  
+  # all captures
+  capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="All Captures Query", fields= "*")%>%
+    as_tibble()%>%
+    mutate(
+      Year = as.numeric(year(ymd(as.character(Survey_Date)))),
+      Month = as.numeric(month(ymd(as.character(Survey_Date)))),
+      jdate = as.numeric(julian(ymd(as.character(Survey_Date)))),
+      DOY = as.numeric(yday(ymd(as.character(Survey_Date)))),
+      Capture_Type = ifelse(Capcode=="0", "No_Captures",
+                                   ifelse(Capcode=="1", "New_Fish",
+                                      ifelse(Capcode=="2", "Recapture",
+                                        ifelse(Capcode=="3", "Natural_Origin",
+                                          ifelse(Capcode=="5", "New_Fish","Lost"))))), #all variants of Capcode 4 were lost (we may want to differentiate for some analyses)
+       #define initial capture as a control or treatment
+      Treatment = ifelse(Survey_type%in%c("Control Release TP","Control Release MHE","Control Recycle"), "Control",
+                                  ifelse(Survey_type=="Angling", "Treatment","Other")),
+      run_year = as.numeric(ifelse(as.numeric(Year=="2017")&as.numeric(Month>8)&SpeciesCode=="COHO","2017",
+                                 ifelse(as.numeric(Year=="2018")&as.numeric(Month<5)&SpeciesCode=="COHO","2017",
+                                        ifelse(as.numeric(Year=="2018")&as.numeric(Month>8)&SpeciesCode=="COHO","2018",
+                                               ifelse(as.numeric(Year=="2019")&as.numeric(Month<5)&SpeciesCode=="COHO","2018",
+                                                      ifelse(as.numeric(Year=="2019")&as.numeric(Month>8)&SpeciesCode=="COHO","2019",
+                                                             ifelse(as.numeric(Year=="2020")&as.numeric(Month<5)&SpeciesCode=="COHO","2019",
+                                                                    ifelse(as.numeric(Year=="2017")&SpeciesCode=="STLHD","2017",
+                                                                           ifelse(as.numeric(Year=="2018")&SpeciesCode=="STLHD","2018",
+                                                                                  ifelse(as.numeric(Year=="2019")&SpeciesCode=="STLHD","2019",
+                                                                                         ifelse(as.numeric(Year=="2020")&as.numeric(Month<2)&SpeciesCode=="STLHD","2019",
+                                                                                                ifelse(as.numeric(Year=="2020")&as.numeric(Month>2)&SpeciesCode=="STLHD","2020",as.numeric(Year))))))))))))
+    ))%>%left_join(location.df,by=c(Release_Location="Location Name"))
+    
+  #only first captures that were new fish (T or C)
+  firstcapture = capture.df%>%
+    filter(Capcode=="1"|Capcode =="5") #these are initial captures and excludes Capcode 3s and 4s
+  
+  #only first recaptures
+  recapture = capture.df%>%
+    filter(Capcode=="2")%>%
+    group_by(Fish_ID)%>%
+    arrange(Survey_Date,TimeCapture)%>%
+    slice(1L) #get first data/time recapure for each fish ID
+    
+  #merge capture-recapture & create dummy variable for recaptures
+  dat<-firstcapture%>%
+    left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
+    mutate(rec=ifelse(!is.na(DOY_recap),1,0),
+           time = round(julian(Survey_Date_recap)-julian(Survey_Date_cap))
+           )#join first captures with first recaptures
+  saveRDS(dat,"data.rds")
+}else{
+  dat<-readRDS("data.rds")
+}
 ```
 # NOTES 
 
