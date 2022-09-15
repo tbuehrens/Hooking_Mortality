@@ -213,19 +213,18 @@ Things to explore in analysis
       •	Drop by run_year in following term: ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
 
 
-```{r inelegant solutions}
+```{r solutions for NAs and ref cats}
 
 #Solution to replace NAs in the control dataset with "Control"
 #Apparently "across()" is currently bugged out, test solutions on github and stack do not work even with the example dfs
 
-replace_control = function(x){
-  ifelse(is.na(x), "Control",x)
-}
 
-test = filter(dat, Treatment_cap == "Control")  %>%
-  mutate_all( ~replace_control(.x)) %>%
-  bind_rows(dat, Treatment_cap == "Control")
+treatvars = dat %>%
+  dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+  names()
 
+test = dat %>%
+  mutate_at(vars(treatvars), ~ifelse(is.na(.) & Treatment_cap == "Control", "Control",.))
 
 ```
 
