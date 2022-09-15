@@ -33,7 +33,7 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("tidyverse", "plyr","dplyr", "lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
+packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
 install_or_load_pack(pack = packages_list)
 # remove.packages("rstanarm")
 # install_github("stan-dev/rstanarm")
@@ -218,13 +218,13 @@ Things to explore in analysis
 #Solution to replace NAs in the control dataset with "Control"
 #Apparently "across()" is currently bugged out, test solutions on github and stack do not work even with the example dfs
 
-replace_control = function(x){
-  ifelse(is.na(x), "Control",x)
-}
-
-test = filter(dat, Treatment_cap == "Control")  %>%
-  mutate_all( ~replace_control(.x)) %>%
-  bind_rows(dat, Treatment_cap == "Control")
+# replace_control = function(x){
+#   ifelse(is.na(x), "Control",x)
+# }
+# 
+# test = filter(dat, Treatment_cap == "Control")  %>%
+#   mutate_all( ~replace_control(.x)) %>%
+#   bind_rows(dat, Treatment_cap == "Control")
 
 
 ```
@@ -245,27 +245,38 @@ cdat<-dat%>%
     Temp_C_cap,
     Release_Location_cap,
     Capture_Location_recap,
-    survey_ID_cap,
-    Gear_cap
+    Gear_cap,
+    Barb_cap,
+    survey_ID_cap
                 )%>%
-  mutate(Gear_cap = ifelse(is.na(Gear_cap), "Control", Gear_cap)) %>%
-  mutate(run_year_cap = as.factor(run_year_cap),
-         Treatment_cap = as.factor(Treatment_cap),
-         Gear_cap = factor(Gear_cap, levels = c("Con", "B", "BL", "J","F","L"))) %>%
-  filter(Gear_cap != "BL")
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(c(Gear_cap, Barb_cap), ~tidyr::replace_na(., "Control")))%>%
+  mutate(across(c(Gear_cap, Barb_cap), ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(!Gear_cap=="BL")
+
 
 m1<-gam(rec ~ 
-          1
-          + s(run_year_cap,bs="re") 
-          + s(DOY_cap,by=run_year_cap,k=20,m=1)
-          + s(survey_ID_cap,bs="re",m=1)+
-          Treatment_cap +
-          Treatment_cap : Gear_cap
+          # Effects Shared by T & C
+          # + s(run_year_cap,bs="re")
+          # + s(DOY_cap,run_year_cap,bs="fs",m=2)
+          # + s(survey_ID_cap,bs="re")
+
+          # Treatment effects
+          + Gear_cap : Treatment_cap
+          + Barb_cap : Treatment_cap
+        
+        
           ,family = binomial(link="logit")
           ,data=cdat
     )
 
-summary(m1)
+
+cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap)%>%tally()
+
+
+
 cat("\\begin{verbatim}")
 cat(print("Summary GAM results for probability of recapture for control coho"))
 try(cat(print(summary(m1)),silent = T))
@@ -275,63 +286,76 @@ cat("\\end{verbatim}")
 
 
 newdat<-expand.grid(
-  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
-  run_year_cap = unique(cdat$run_year_cap),
-  survey_ID_cap = 0
+  #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  #run_year_cap = unique(cdat$run_year_cap),
+  DOY_cap = 0,
+  run_year_cap = 0,
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Treatment"
   )%>%
   as_tibble()
 
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+  as_tibble()
+
+newdat2<-
+    tibble(
+      DOY_cap = 0,
+      run_year_cap = 0,
+      survey_ID_cap = 0,
+      Gear_cap = "Control",
+      Barb_cap ="Control",
+      Treatment_cap = "Control"
+    )
+
+preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
   as_tibble()
 
 newdat<-newdat%>%
   bind_cols(preds)
 
-ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
-  geom_line(size=0.8)+
-  ylim(0,1)+
-  ylab("Predicted Probability of Recapture")+
-  theme_bw()
+newdat2<-newdat2%>%
+  bind_cols(preds2)%>%
+  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
 
 
-
-#try survival analysis
-
-GL<-GaussLobatto(20)
-cdat2<-GAMSurvdataset(GL,data.frame(cdat),which(colnames(cdat)=="time"),which(colnames(cdat)=="rec"))
-
-fGAM<-gam(gam.ev~
-            s(stop,bs="cr")+
-            as.factor(Treatment_cap)+
-            offset(log(gam.dur)),
-          data=cdat2,family="poisson",scale=1,method="REML")
-
-summary(fGAM)
-par(mfrow=c(2,1))
-plot(fGAM,main="Gauss Lobatto (20)",ylab="log-basehaz")
-plot(fGAM,main="Gauss Lobatto (5)",ylab="basehaz",trans=exp)
-#next: https://statmd.wordpress.com/2015/05/03/survival-analysis-with-generalized-additive-models-part-iv-the-survival-function/
+newdat<-newdat%>%
+  tidyr::crossing(newdat2)%>%
+  rowwise()%>%
+  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+         )%>%
+  ungroup()
 
 
-#Poisson gam for recovery time
-
-pois.gam.crec = gam(time ~ 
-          s(run_year_cap,bs="re") 
-          + s(DOY_cap,by=run_year_cap,k=20,m=1)
-          + s(survey_ID_cap,bs="re",m=1)
-          + Treatment_cap
-          ,family = 'poisson'
-          ,data=filter(cdat, rec == 1)
-    )
-summary(pois.gam.crec)
+newdat%>%print(n=35)
 
 
+ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+  ylab("Hooking Mortality")
+  #facet_wrap(~Barb_cap)
+  
+ggplot(newdat,aes(x=Gear_cap,fill=Barb_cap, y=HM))+
+  geom_crossbar(aes(ymin = HM_U50, ymax = HM_U50), width = 0.2)
+  
+# 
+# 
+# ggplot(newdat,aes(x=DOY_cap,y=preds,group=run_year_cap,group=Treatment_cap))+
+#   geom_line(size=0.8)+
+#   facet_wrap(~Treatment_cap)+
+#   ylim(0,1)+
+#   ylab("Predicted Probability of Recapture")+
+#   theme_bw()
+# 
 
 
-
-
-
-#using stan
 
 ```
 
