@@ -213,6 +213,22 @@ Things to explore in analysis
       •	Drop by run_year in following term: ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
 
 
+```{r inelegant solutions}
+
+#Solution to replace NAs in the control dataset with "Control"
+#Apparently "across()" is currently bugged out, test solutions on github and stack do not work even with the example dfs
+
+replace_control = function(x){
+  ifelse(is.na(x), "Control",x)
+}
+
+test = filter(dat, Treatment_cap == "Control")  %>%
+  mutate_all( ~replace_control(.x)) %>%
+  bind_rows(dat, Treatment_cap == "Control")
+
+
+```
+
 # GAM analysis of factors affecting prob of recapture for control Coho
 ```{r GAM analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
 cdat<-dat%>%
@@ -229,19 +245,27 @@ cdat<-dat%>%
     Temp_C_cap,
     Release_Location_cap,
     Capture_Location_recap,
-    survey_ID_cap
+    survey_ID_cap,
+    Gear_cap
                 )%>%
-  mutate(run_year_cap = factor(run_year_cap))
+  mutate(Gear_cap = ifelse(is.na(Gear_cap), "Control", Gear_cap)) %>%
+  mutate(run_year_cap = as.factor(run_year_cap),
+         Treatment_cap = as.factor(Treatment_cap),
+         Gear_cap = factor(Gear_cap, levels = c("Con", "B", "BL", "J","F","L"))) %>%
+  filter(Gear_cap != "BL")
 
 m1<-gam(rec ~ 
           1
           + s(run_year_cap,bs="re") 
           + s(DOY_cap,by=run_year_cap,k=20,m=1)
-          + s(survey_ID_cap,bs="re",m=1)
+          + s(survey_ID_cap,bs="re",m=1)+
+          Treatment_cap +
+          Treatment_cap : Gear_cap
           ,family = binomial(link="logit")
           ,data=cdat
     )
 
+summary(m1)
 cat("\\begin{verbatim}")
 cat(print("Summary GAM results for probability of recapture for control coho"))
 try(cat(print(summary(m1)),silent = T))
@@ -287,6 +311,25 @@ par(mfrow=c(2,1))
 plot(fGAM,main="Gauss Lobatto (20)",ylab="log-basehaz")
 plot(fGAM,main="Gauss Lobatto (5)",ylab="basehaz",trans=exp)
 #next: https://statmd.wordpress.com/2015/05/03/survival-analysis-with-generalized-additive-models-part-iv-the-survival-function/
+
+
+#Poisson gam for recovery time
+
+pois.gam.crec = gam(time ~ 
+          s(run_year_cap,bs="re") 
+          + s(DOY_cap,by=run_year_cap,k=20,m=1)
+          + s(survey_ID_cap,bs="re",m=1)
+          + Treatment_cap
+          ,family = 'poisson'
+          ,data=filter(cdat, rec == 1)
+    )
+summary(pois.gam.crec)
+
+
+
+
+
+
 
 #using stan
 
