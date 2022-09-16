@@ -1,0 +1,894 @@
+---
+title: "Hooking Mortality"
+author: "TBD"
+output:
+  html_document:
+    fig_caption: yes
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+***
+
+Page Last Updated: `r format(Sys.time(), '%m/%d/%Y')`.
+
+***
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Functions
+```{r load functions, results = "hide",echo = T, message = FALSE, warning = FALSE}
+wd_functions<-"functions"
+sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
+```
+
+# Install & Load Packages
+This section of code will load the packages we need to complete the analysis
+```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
+packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
+install_or_load_pack(pack = packages_list)
+# remove.packages("rstanarm")
+# install_github("stan-dev/rstanarm")
+```
+
+
+# Read and organize data
+```{r load data, results = "hide",echo = T, message = FALSE, warning = FALSE }
+#only read data from DB if not already in data.rds
+if(!file.exists("data.rds")){
+  #locations from table
+  location.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="Location Index", fields= "*")%>%
+    as_tibble()%>%
+    mutate(lat=ifelse(!is.na(Loc_Lat),Loc_Lat,(US_Lat + DS_Lat)/2),
+           lon=ifelse(!is.na(Loc_Lon),Loc_Lon,(US_Lon + DS_Lon)/2)
+           )%>%
+    filter(!is.na(lat))%>%
+    dplyr::select(`Location Name`,lat,lon)
+  
+  points.dec = SpatialPoints(cbind(location.df$lon, location.df$lat), proj4string=CRS("+proj=longlat"))
+  
+  #cowlitz flow line shape file
+  river.sh<-st_read("WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp")
+  points.plot <- data.frame(spTransform(points.dec, crs(river.sh)))%>%
+    dplyr::rename(lon=coords.x1,lat=coords.x2)
+  
+  #Map river with locations
+  ggplot() + 
+    geom_sf(data = river.sh, size = 1, color = "black", fill = "cyan1") + 
+    ggtitle("Cowlitz River & Hooking Mortality Study Locations") + 
+    coord_sf()+
+    geom_point(data=points.plot,mapping=aes(x=lon,y=lat),color="red",size=2)
+  
+  river_sp<-readShapeLines(
+    fn="WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp",
+    proj4string=CRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs ")
+    , verbose=FALSE
+    ,repair=FALSE
+    ,delete_null_obj=FALSE
+    )
+  
+  river<-line2network(
+    sp = river_sp,
+    path = ".",
+    layer = NA,
+    tolerance = 100,
+    reproject = NULL,
+    supplyprojection = NULL
+  )
+  
+  river_2<-setmouth(seg=354, vert=1, rivers=river)
+  #showends(seg=354,rivers=river)
+  
+  
+  points.UTM <- spTransform(points.dec, crs(river_sp))
+  points<-xy2segvert(x=points.UTM$coords.x1,y=points.UTM$coords.x2,rivers=river_2)
+  
+  #plot(river)
+  #riverpoints(seg=points$seg, vert=points$vert, rivers=river, pch=15,col="blue")
+  
+  RKM<-mouthdistbysurvey(
+    unique=1:dim(points)[1],
+    survey=rep(1,dim(points)[1]),
+    seg=points$seg,
+    vert=points$vert,
+    rivers = river_2,
+    logical = NULL,
+    stopiferror = TRUE,
+    algorithm = NULL
+  )/1000
+  
+  location.df<-location.df%>%
+    bind_cols(RKM=RKM)
+  
+  
+  # all captures
+  capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="All Captures Query", fields= "*")%>%
+    as_tibble()%>%
+    mutate(
+      Year = as.numeric(year(ymd(as.character(Survey_Date)))),
+      Month = as.numeric(month(ymd(as.character(Survey_Date)))),
+      jdate = as.numeric(julian(ymd(as.character(Survey_Date)))),
+      DOY = as.numeric(yday(ymd(as.character(Survey_Date)))),
+      Capture_Type = ifelse(Capcode=="0", "No_Captures",
+                                   ifelse(Capcode=="1", "New_Fish",
+                                      ifelse(Capcode=="2", "Recapture",
+                                        ifelse(Capcode=="3", "Natural_Origin",
+                                          ifelse(Capcode=="5", "New_Fish","Lost"))))), #all variants of Capcode 4 were lost (we may want to differentiate for some analyses)
+       #define initial capture as a control or treatment
+      Treatment = ifelse(Survey_type%in%c("Control Release TP","Control Release MHE","Control Recycle"), "Control",
+                                  ifelse(Survey_type=="Angling", "Treatment","Other")),
+      run_year = as.numeric(ifelse(as.numeric(Year=="2017")&as.numeric(Month>8)&SpeciesCode=="COHO","2017",
+                                 ifelse(as.numeric(Year=="2018")&as.numeric(Month<5)&SpeciesCode=="COHO","2017",
+                                        ifelse(as.numeric(Year=="2018")&as.numeric(Month>8)&SpeciesCode=="COHO","2018",
+                                               ifelse(as.numeric(Year=="2019")&as.numeric(Month<5)&SpeciesCode=="COHO","2018",
+                                                      ifelse(as.numeric(Year=="2019")&as.numeric(Month>8)&SpeciesCode=="COHO","2019",
+                                                             ifelse(as.numeric(Year=="2020")&as.numeric(Month<5)&SpeciesCode=="COHO","2019",
+                                                                    ifelse(as.numeric(Year=="2017")&SpeciesCode=="STLHD","2017",
+                                                                           ifelse(as.numeric(Year=="2018")&SpeciesCode=="STLHD","2018",
+                                                                                  ifelse(as.numeric(Year=="2019")&SpeciesCode=="STLHD","2019",
+                                                                                         ifelse(as.numeric(Year=="2020")&as.numeric(Month<2)&SpeciesCode=="STLHD","2019",
+                                                                                                ifelse(as.numeric(Year=="2020")&as.numeric(Month>2)&SpeciesCode=="STLHD","2020",as.numeric(Year))))))))))))
+    ))%>%left_join(location.df,by=c(Release_Location="Location Name"))
+    
+  #only first captures that were new fish (T or C)
+  firstcapture = capture.df%>%
+    filter(Capcode=="1"|Capcode =="5") #these are initial captures and excludes Capcode 3s and 4s
+  
+  #only first recaptures
+  recapture = capture.df%>%
+    filter(Capcode=="2")%>%
+    group_by(Fish_ID)%>%
+    arrange(Survey_Date,TimeCapture)%>%
+    slice(1L) #get first data/time recapure for each fish ID
+    
+  #merge capture-recapture & create dummy variable for recaptures
+  dat<-firstcapture%>%
+    left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
+    mutate(rec=ifelse(!is.na(DOY_recap),1,0),
+           time = round(julian(Survey_Date_recap)-julian(Survey_Date_cap))
+           )#join first captures with first recaptures
+  saveRDS(dat,"data.rds")
+}else{
+  dat<-readRDS("data.rds")
+}
+```
+# NOTES 
+
+### Analysis
+
+Options for Analysis:
+1. Binomial-logit with dummy variable with dummy variable for TC
+2. Split binomial R2R
+3. Time to recovery (survival analysis)
+
+Things to explore in analysis
+1. Including Capcode as a factor variable in the treatment effects would test for an "unaccounted for" control effect; Cap-code 5 would be lower recovery rate if unaccounted effect.
+
+
+### Notes on Data and Database:
+1. Added lat/long to database for Barrier Dam (missing originally)
+2. Maybe need to exclude control Capcode 2 and 5's that were released in upper basin/brood first? 1 present in coho, several spring Chinook.
+
+* Capcodes really important
+  * Filter out capcode 0’s
+  * Filter out wild fish
+  * Capcode 5 = fish that went from control release to treatment fish
+    * Initially tags pulled and new floys put in fish
+    *	Later, fish simply release with old floys
+* Multiple recap fish
+  * Make sure to filter for initial releases and only “count” single recapture
+* Consider removint fish that aren’t available for recapture
+  * Capcode 1---look for “loss on capture” (mortality) in both treatments and controls
+  * (only 5 controls died)
+* Look for errata
+  * Example: fish that had no release record but were recovered, we created a release record
+
+### Thomas Musing's on analysis
+
+* For coho and spring chinook, it’s relatively trivial…we basically have day of year and year (year only for coho) that can affect recovery rates, because we released basically all the controls at barrier pool…nice simple clean study design with not *too many* possible competing models
+* For steelhead, we released controls at multiple locations AND the hatchery (where fish presumably home) is not adjacent to the principle recovery location (separator). We have to at least consider trying to account for year effects, day of year effects, river kilometer of release effects, and possible 2- and 3-way interactions. Since many of these are expected to be non-linear, I used splines. When you add the number of candidate models with just combinations of main effects and interactions it is a lot of models. Then you can consider the spline hyperparameters (basis function type, number of knots, penalty order) and the number of candidate models is huge. I can up with an approach that simplifies this a bit by basically factoring out year (using “by” in spline notation), so that effects were independent by year. That said, I am still thinking on how to “simplify” the spline analysis for non-linear effects affecting capture probabilities for controls…want a defensible final model without exhaustively testing 1000’s of models (and thereby likely finding one that isn’t the best anyway!). I think my default idea is to basically fit a “full” penalized model for all variables possibly affecting control recoveries, knowing not all variables may be “significant” but by penalizing, it won’t be overfitting, and we aren’t really interested in hypothesis testing control variables anyway…just controlling for their effects.
+
+### Notes from 12/10/2021
+•	Ben Locations
+•	Thomas-Mark
+    Meet to talk about survival models
+    Bathtub curve survival models--machine parts (quick wear and then)
+    Thomas with help simplify control and mabe treatment for coho
+      Check effect on controls:
+      •	Length
+      •	sex effect 
+      •	fish condition
+      maybe beta-binomial
+      2018 coho
+      •	Did barrier pool close?
+      S. Steelhead
+      •	Drop by run_year in following term: ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
+
+
+```{r inelegant solutions}
+
+#Solution to replace NAs in the control dataset with "Control"
+#Apparently "across()" is currently bugged out, test solutions on github and stack do not work even with the example dfs
+
+# replace_control = function(x){
+#   ifelse(is.na(x), "Control",x)
+# }
+# 
+# test = filter(dat, Treatment_cap == "Control")  %>%
+#   mutate_all( ~replace_control(.x)) %>%
+#   bind_rows(dat, Treatment_cap == "Control")
+
+
+```
+
+# GAM analysis of factors affecting prob of recapture for control Coho
+```{r GAM analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
+treatvars = dat %>%
+  dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+  names()
+
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
+  dplyr::select(
+    rec,
+    time,
+    Treatment_cap,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    Capture_Location_recap,
+    survey_ID_cap,
+    treatvars
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(!Gear_cap%in%c("BL")) #F
+
+  #mutate(across(treatvars, ~tidyr::replace_na(., "Control")))%>%
+  #mutate(across(c(Gear_cap, Barb_cap), ~ fct_relevel(.,"Control",after=0)))%>%
+
+
+
+cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+
+
+m1<-gam(rec ~ 
+          1
+          #Effects Shared by T & C
+          + s(survey_ID_cap,bs="re")
+          + s(DOY_cap,run_year_cap,bs="fs")
+
+          # Treatment effects
+          #+ Treatment_cap
+          + Gear_cap
+          + Barb_cap 
+          + Gear_cap : Barb_cap
+        
+        
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+# cat("\\begin{verbatim}")
+# cat(print("Summary GAM results for probability of recapture for control coho"))
+# try(cat(print(summary(m1)),silent = T))
+# cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+# try(cat(print(gam.check(m1)),silent = T))
+# cat("\\end{verbatim}")
+
+#=========================
+# Recaps by Date location
+#========================
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap=="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap=="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Control"
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
+  geom_line(size=0.8)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+#=============================
+#effect of treatment variables
+#=============================
+newdat<-expand.grid(
+  #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  #run_year_cap = unique(cdat$run_year_cap),
+  DOY_cap = 0,
+  run_year_cap = 0,
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Treatment"
+  )%>%
+  as_tibble()%>%
+  filter(!(Gear_cap == "F" & Barb_cap =="No")) #no fish caught with un-barbed flies
+
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+  as_tibble()
+
+newdat2<-
+    tibble(
+      DOY_cap = 0,
+      run_year_cap = 0,
+      survey_ID_cap = 0,
+      Gear_cap = "Control",
+      Barb_cap ="Control",
+      Treatment_cap = "Control"
+    )
+
+preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+newdat2<-newdat2%>%
+  bind_cols(preds2)%>%
+  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+
+
+newdat<-newdat%>%
+  tidyr::crossing(newdat2)%>%
+  rowwise()%>%
+  mutate(HM = ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+         )%>%
+  mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))%>%
+  ungroup()
+
+
+newdat%>%print(n=35)
+
+
+ggplot(newdat, aes(x=Gear_cap, fill=Barb_cap)) +
+  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+  geom_hline(yintercept=0)+
+  ylab("Hooking Mortality")
+
+
+newdat%>%dplyr::select(Gear_cap,Barb_cap,HM)%>%pivot_wider(names_from = Barb_cap,values_from = HM)%>%mutate(Barb_odds=Yes/No)
+#main effect of barbs: 1) fit full model, 2) ilogit (intercept + main barb yes)/ ilogit (intercept + main barb no)
+
+#controls could be poor
+  # location (boat launch vs. pool)
+  # extra handling/trucking
+```
+
+# GAM analysis of factors affecting prob of recapture for Summer Steelhead
+```{r GAM analysis S Steelhead, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="STLHD"& Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
+  dplyr::select(
+    rec,
+    time,
+    Treatment_cap,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    RKM_cap,
+    Release_Location_cap,
+    Capture_Location_recap,
+    survey_ID_cap,
+    treatvars
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(!run_year_cap%in%c(2020))
+
+
+cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+                                                                             
+
+m1<-gam(rec ~ 
+          1
+          + s(survey_ID_cap,bs="re")
+          + s(DOY_cap,run_year_cap,bs="fs")
+          + s(RKM_cap,run_year_cap,bs="fs")
+          + ti(RKM_cap,DOY_cap,m=2,k=c(5))
+
+          #+ Treatment_cap
+          + Gear_cap
+          #+ Gear_cap : Barb_cap #only one gear with both barb and no-barb
+          + Barb_cap
+        
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+cat("\\begin{verbatim}")
+cat(print("Summary GAM results for probability of recapture for control coho"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+try(cat(print(gam.check(m1)),silent = T))
+cat("\\end{verbatim}")
+
+#=========================
+# Recaps by Date location
+#========================
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  RKM_cap = unique(cdat$RKM_cap),
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap=="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap=="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Control"
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = "s(survey_ID_cap)"))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=factor(RKM_cap)))+
+  geom_line(size=0.8)+
+  facet_wrap(~run_year_cap,ncol=1)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+
+ggplot(newdat%>%filter(DOY_cap==200),aes(x=RKM_cap,y=preds,color=run_year_cap))+
+  geom_line(size=0.8)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+#=============================
+#effect of treatment variables
+#=============================
+newdat<-expand.grid(
+  #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  #run_year_cap = unique(cdat$run_year_cap),
+  DOY_cap = 0,
+  run_year_cap = 0,
+  survey_ID_cap = 0,
+  RKM_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Treatment"
+  )%>%
+  as_tibble()%>%
+  filter(!(Gear_cap == "L" & Barb_cap =="No")) #no fish caught with un-barbed lures
+
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
+  as_tibble()
+
+newdat2<-
+    tibble(
+      DOY_cap = 0,
+      run_year_cap = 0,
+      survey_ID_cap = 0,
+      RKM_cap = 0,
+      Gear_cap = "Control",
+      Barb_cap ="Control",
+      Treatment_cap = "Control"
+    )
+
+preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+newdat2<-newdat2%>%
+  bind_cols(preds2)%>%
+  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+
+
+newdat<-newdat%>%
+  tidyr::crossing(newdat2)%>%
+  rowwise()%>%
+  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+         )%>%
+  ungroup()
+
+
+newdat%>%print(n=35)
+
+
+ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+  geom_hline(yintercept=0)+
+  ylab("Hooking Mortality")
+```
+# GAM analysis of factors affecting prob of recapture for Winter Steelhead
+
+NOTE: analysis NOT final...still lack of fit for tensor product interaction term...need to examine residuals...steelhead data funky as expected...possibly filter recovery locations to separator.
+```{r GAM analysis W Steelhead, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="WSTLHD"& Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
+  dplyr::select(
+    rec,
+    time,
+    Treatment_cap,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    RKM_cap,
+    Release_Location_cap,
+    Capture_Location_recap,
+    survey_ID_cap,
+    treatvars
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))
+
+
+
+cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+                                                                             
+
+m1<-gam(rec ~ 
+          1
+          + s(survey_ID_cap,bs="re")
+          + s(DOY_cap,run_year_cap,bs="fs")
+          + s(RKM_cap,run_year_cap,bs="fs",k=3)
+          + ti(RKM_cap,DOY_cap,m=2,k=c(3))
+
+          #+ Treatment_cap
+          + Gear_cap
+          + Gear_cap : Barb_cap
+          + Barb_cap
+        
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+cat("\\begin{verbatim}")
+cat(print("Summary GAM results for probability of recapture for control coho"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+try(cat(print(gam.check(m1)),silent = T))
+cat("\\end{verbatim}")
+
+#=========================
+# Recaps by Date location
+#========================
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  RKM_cap = unique(cdat$RKM_cap),
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap=="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap=="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Control"
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = "s(survey_ID_cap)"))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=factor(RKM_cap)))+
+  geom_line(size=0.8)+
+  facet_wrap(~run_year_cap,ncol=1)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+
+ggplot(newdat%>%filter(DOY_cap==100),aes(x=RKM_cap,y=preds,color=run_year_cap))+
+  geom_line(size=0.8)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+#=============================
+#effect of treatment variables
+#=============================
+newdat<-expand.grid(
+  #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  #run_year_cap = unique(cdat$run_year_cap),
+  DOY_cap = 0,
+  run_year_cap = 0,
+  survey_ID_cap = 0,
+  RKM_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Treatment"
+  )%>%
+  as_tibble()
+
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
+  as_tibble()
+
+newdat2<-
+    tibble(
+      DOY_cap = 0,
+      run_year_cap = 0,
+      survey_ID_cap = 0,
+      RKM_cap = 0,
+      Gear_cap = "Control",
+      Barb_cap ="Control",
+      Treatment_cap = "Control"
+    )
+
+preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+newdat2<-newdat2%>%
+  bind_cols(preds2)%>%
+  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+
+
+newdat<-newdat%>%
+  tidyr::crossing(newdat2)%>%
+  rowwise()%>%
+  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+         )%>%
+  ungroup()
+
+
+newdat%>%print(n=35)
+
+
+ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+  geom_hline(yintercept=0)+
+  ylab("Hooking Mortality")
+```
+
+# GAM analysis of factors affecting prob of recapture for spring Chinook
+
+ONLY use 2018 controls, exlcude all but barrier dam (which means this applies to angled fish too)
+```{r GAM analysis SPCK, results="hold",echo = T, message = T, warning = FALSE }
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="SCHK" & Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
+  dplyr::select(
+    rec,
+    time,
+    Treatment_cap,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    RKM_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    Capture_Location_recap,
+    survey_ID_cap,
+    treatvars
+                )%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(run_year_cap == 2018
+         & RKM_cap >115
+         )
+
+cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+
+
+m1<-gam(rec ~ 
+          1
+          # Effects Shared by T & C
+          + s(survey_ID_cap,bs="re")
+          + s(DOY_cap,run_year_cap,bs="fs")
+
+          # Treatment effects
+          #+ Treatment_cap
+          #+ Gear_cap 
+          + Barb_cap 
+          + Gear_cap : Barb_cap
+        
+        
+          ,family = binomial(link="logit")
+          ,data=cdat
+    )
+
+# cat("\\begin{verbatim}")
+# cat(print("Summary GAM results for probability of recapture for control coho"))
+# try(cat(print(summary(m1)),silent = T))
+# cat(print("GAM Goodness of Fit check for probability of recapture for control coho"))
+# try(cat(print(gam.check(m1)),silent = T))
+# cat("\\end{verbatim}")
+
+#=========================
+# Recaps by Date location
+#========================
+newdat<-expand.grid(
+  DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  run_year_cap = unique(cdat$run_year_cap),
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap=="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap=="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Control"
+  )%>%
+  as_tibble()
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+
+ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
+  geom_line(size=0.8)+
+  ylim(0,1)+
+  ylab("Predicted Probability of Recapture")+
+  theme_bw()
+#=============================
+#effect of treatment variables
+#=============================
+newdat<-expand.grid(
+  #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
+  #run_year_cap = unique(cdat$run_year_cap),
+  DOY_cap = 0,
+  run_year_cap = 0,
+  survey_ID_cap = 0,
+  Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
+  Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
+  Treatment_cap = "Treatment"
+  )%>%
+  as_tibble()%>%
+  filter(!(Gear_cap == "L" & Barb_cap =="No")) #no fish caught with un-barbed lures
+
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+  as_tibble()
+
+newdat2<-
+    tibble(
+      DOY_cap = 0,
+      run_year_cap = 0,
+      survey_ID_cap = 0,
+      Gear_cap = "Control",
+      Barb_cap ="Control",
+      Treatment_cap = "Control"
+    )
+
+preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+  as_tibble()
+
+newdat<-newdat%>%
+  bind_cols(preds)
+
+newdat2<-newdat2%>%
+  bind_cols(preds2)%>%
+  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+
+
+newdat<-newdat%>%
+  tidyr::crossing(newdat2)%>%
+  rowwise()%>%
+  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+         )%>%
+  mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))%>%
+  ungroup()
+
+
+newdat%>%print(n=35)
+
+
+ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+  geom_hline(yintercept=0)+
+  ylab("Hooking Mortality")
+
+```
+
+# Simulation GLM for dummy variable survival analysis
+```{r simulated data model check, results="hold",echo = T, message = T, warning = FALSE }
+n<-2000 #total fish
+n_t=round(0.5*n) #number of treatment fish
+TC<-data.frame(TC=c(rep(0,(n-n_t)),rep(1,n_t))) #dummy vector for Treatment and controls
+k_rec<-3 #count of global covariates including global intercept
+k_surv<-2 #count of global covariates
+b<-rnorm(k_rec+k_surv,0,1) # beta's for global covariates
+x<-bind_cols(data.frame("int"=rep(1,n)),as_tibble(mvrnorm(n=n,mu=rep(0,k_rec+k_surv-1), Sigma=diag(k_rec+k_surv-1)))) #design matrix
+
+
+#=========
+# binomial
+#=========
+logit_pred<-data.frame(logit_pred=as.matrix(x[,1:k_rec]) %*% b[1:k_rec] + #global covariates and intercept
+    as.matrix((as.matrix(x[,(k_rec+1):(k_rec+k_surv)]) * cbind(TC,TC))) %*% b[(k_rec+1):(k_rec+k_surv)]) #treatment covariates (interaction with dummy variable)
+
+#=========
+# R2R
+#=========
+logit_pred<-data.frame(logit_pred=logit(ilogit(as.matrix(x[,1:k_rec]) %*% b[1:k_rec] + #global covariates and intercept
+                                               as.matrix((as.matrix(x[,(k_rec+1):(k_rec+k_surv)]) * cbind(TC,TC))) %*% b[(k_rec+1):(k_rec+k_surv)]))) #treatment covariates (interaction with dummy variable)
+
+dat<-x%>%
+  bind_cols(TC)%>%
+  bind_cols(logit_pred)%>%
+  as_tibble()%>%
+  mutate(
+  rec = rbinom(n=n, size=1, prob= ilogit(logit_pred))
+  )
+
+
+#==========
+# BRMS fits
+#==========
+fmla<-as.formula(paste0("rec ~ ",paste("V",1:(k_rec-1),sep="",collapse =   "+ "),"+", paste("TC : V",(k_rec):(k_rec+k_surv-1),sep="",collapse =   "+ ")))
+
+#m1<-brm(fmla, family = bernoulli(link="logit"),data=dat,cores = 4,chains=4,iter=2000,warmup = 1000)
+#m1<-brm(fmla, family = poisson(link="log"),data=dat,cores = 4,chains=4,iter=2000,warmup = 1000)
+m1<-glm(fmla, family = binomial(link="logit"),data=dat)
+
+cat("\\begin{verbatim}")
+cat(print("Summary GLM results with simulated data"))
+try(cat(print(summary(m1)),silent = T))
+cat(print("Actual parameter values used to generate simulated data"))
+print(b)
+cat("\\end{verbatim}")
+```
+
+# A stan model for fitting R2R models with no covariates
+```{r }
+processFile(file.path("stan_models", "R2R.stan"))
+```
+
+
+
