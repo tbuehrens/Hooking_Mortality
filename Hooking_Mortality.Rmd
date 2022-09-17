@@ -33,10 +33,11 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools") 
+packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom") 
 install_or_load_pack(pack = packages_list)
-# remove.packages("rstanarm")
-# install_github("stan-dev/rstanarm")
+#remove.packages(c("StanHeaders", "rstan","RcppParallel"))
+#install.packages("rstan", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
+#library(rstan)
 ```
 
 
@@ -235,6 +236,8 @@ treatvars = dat %>%
   dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
   names()
 
+Gear_lookup<-tibble(Gear_LU=c(Bait,Lure,Jig,Fly))
+
 cdat<-dat%>%
   filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
   mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
@@ -264,24 +267,38 @@ cdat<-dat%>%
 
 
 
-cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+cdat%>%
+  group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%
+  dplyr::rename(Treatment = Treatment_cap,
+                Gear = Gear_cap,
+                Barb = Barb_cap
+                )%>%
+  mutate(rec = ifelse(rec == 1,"Recapture","Non-Recapture"))%>%
+  tally()%>%
+  pivot_wider(names_from=rec,values_from = n)%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+
+
+
 
 
 m1<-gam(rec ~ 
           1
           #Effects Shared by T & C
-          + s(survey_ID_cap,bs="re")
+          + s(survey_ID_cap, bs ="re")
           + s(DOY_cap,run_year_cap,bs="fs")
 
           # Treatment effects
           #+ Treatment_cap
           + Gear_cap
-          + Barb_cap 
+          + Barb_cap
           + Gear_cap : Barb_cap
-        
-        
+          #+ HookType_cap : HookSize_cap
           ,family = binomial(link="logit")
           ,data=cdat
+          ,method = "REML"
     )
 
 # cat("\\begin{verbatim}")
@@ -873,7 +890,7 @@ dat<-x%>%
 #==========
 fmla<-as.formula(paste0("rec ~ ",paste("V",1:(k_rec-1),sep="",collapse =   "+ "),"+", paste("TC : V",(k_rec):(k_rec+k_surv-1),sep="",collapse =   "+ ")))
 
-#m1<-brm(fmla, family = bernoulli(link="logit"),data=dat,cores = 4,chains=4,iter=2000,warmup = 1000)
+m1<-brm(fmla, family = bernoulli(link="logit"),data=dat,cores = 4,chains=4,iter=2000,warmup = 1000)
 #m1<-brm(fmla, family = poisson(link="log"),data=dat,cores = 4,chains=4,iter=2000,warmup = 1000)
 m1<-glm(fmla, family = binomial(link="logit"),data=dat)
 
