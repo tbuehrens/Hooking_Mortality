@@ -236,7 +236,7 @@ treatvars = dat %>%
   dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
   names()
 
-Gear_lookup<-tibble(Gear_LU=c(Bait,Lure,Jig,Fly))
+Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
 
 cdat<-dat%>%
   filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
@@ -255,6 +255,9 @@ cdat<-dat%>%
     survey_ID_cap,
     treatvars
                 )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
   mutate(run_year_cap = factor(run_year_cap),
          Treatment_cap = factor(Treatment_cap)
          )%>%
@@ -328,11 +331,14 @@ newdat<-newdat%>%
   bind_cols(preds)
 
 
-ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
+p<-ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
   geom_line(size=0.8)+
   ylim(0,1)+
   ylab("Predicted Probability of Recapture")+
   theme_bw()
+
+print(p)
+ggsave("Coho_Space_Time.png",p,width = 5, height = 5, units = "in")
 #=============================
 #effect of treatment variables
 #=============================
@@ -424,6 +430,9 @@ cdat<-dat%>%
     survey_ID_cap,
     treatvars
                 )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
   mutate(run_year_cap = factor(run_year_cap),
          Treatment_cap = factor(Treatment_cap)
          )%>%
@@ -432,7 +441,17 @@ cdat<-dat%>%
   filter(!run_year_cap%in%c(2020))
 
 
-cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+cdat%>%
+  group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%
+  dplyr::rename(Treatment = Treatment_cap,
+                Gear = Gear_cap,
+                Barb = Barb_cap
+                )%>%
+  mutate(rec = ifelse(rec == 1,"Recapture","Non-Recapture"))%>%
+  tally()%>%
+  pivot_wider(names_from=rec,values_from = n)%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
                                                                              
 
 m1<-gam(rec ~ 
@@ -576,6 +595,9 @@ cdat<-dat%>%
     survey_ID_cap,
     treatvars
                 )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
   mutate(run_year_cap = factor(run_year_cap),
          Treatment_cap = factor(Treatment_cap)
          )%>%
@@ -584,7 +606,17 @@ cdat<-dat%>%
 
 
 
-cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+cdat%>%
+  group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%
+  dplyr::rename(Treatment = Treatment_cap,
+                Gear = Gear_cap,
+                Barb = Barb_cap
+                )%>%
+  mutate(rec = ifelse(rec == 1,"Recapture","Non-Recapture"))%>%
+  tally()%>%
+  pivot_wider(names_from=rec,values_from = n)%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
                                                                              
 
 m1<-gam(rec ~ 
@@ -728,6 +760,9 @@ cdat<-dat%>%
     survey_ID_cap,
     treatvars
                 )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
   mutate(run_year_cap = factor(run_year_cap),
          Treatment_cap = factor(Treatment_cap)
          )%>%
@@ -737,7 +772,17 @@ cdat<-dat%>%
          & RKM_cap >115
          )
 
-cdat%>%group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%tally()%>%pivot_wider(names_from=rec,values_from = n)
+cdat%>%
+  group_by(Treatment_cap,Gear_cap,Barb_cap,rec)%>%
+  dplyr::rename(Treatment = Treatment_cap,
+                Gear = Gear_cap,
+                Barb = Barb_cap
+                )%>%
+  mutate(rec = ifelse(rec == 1,"Recapture","Non-Recapture"))%>%
+  tally()%>%
+  pivot_wider(names_from=rec,values_from = n)%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
 
 
 m1<-gam(rec ~ 
