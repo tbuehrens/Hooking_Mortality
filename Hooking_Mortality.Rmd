@@ -263,7 +263,7 @@ cdat<-dat%>%
          )%>%
   mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
   mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
-  filter(!Gear_cap%in%c("BL")) #F
+  filter(!Gear_cap%in%c("Baited Lure")) #F
 
   #mutate(across(treatvars, ~tidyr::replace_na(., "Control")))%>%
   #mutate(across(c(Gear_cap, Barb_cap), ~ fct_relevel(.,"Control",after=0)))%>%
@@ -338,7 +338,7 @@ p<-ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
   theme_bw()
 
 print(p)
-ggsave("Coho_Space_Time.png",p,width = 5, height = 5, units = "in")
+ggsave("Coho_Space_Time.png",p,width = 5, height = 3.5, units = "in")
 #=============================
 #effect of treatment variables
 #=============================
@@ -353,7 +353,7 @@ newdat<-expand.grid(
   Treatment_cap = "Treatment"
   )%>%
   as_tibble()%>%
-  filter(!(Gear_cap == "F" & Barb_cap =="No")) #no fish caught with un-barbed flies
+  filter(!(Gear_cap == "Fly" & Barb_cap =="No")) #no fish caught with un-barbed flies
 
 
 preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
@@ -383,11 +383,11 @@ newdat2<-newdat2%>%
 newdat<-newdat%>%
   tidyr::crossing(newdat2)%>%
   rowwise()%>%
-  mutate(HM = ilogit(preds.fit)/ilogit(control.fit),
-         HM_L50 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
-         HM_U50 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
-         HM_L95 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
-         HM_U95 = quantile((ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
+  mutate(HM = 1 - ilogit(preds.fit)/ilogit(control.fit),
+         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
+         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
+         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
+         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
          )%>%
   mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))%>%
   ungroup()
@@ -396,10 +396,12 @@ newdat<-newdat%>%
 newdat%>%print(n=35)
 
 
-ggplot(newdat, aes(x=Gear_cap, fill=Barb_cap)) +
+p<-ggplot(newdat, aes(x=Gear_cap, fill=Barb_cap)) +
   geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
   ylab("Hooking Mortality")
+print(p)
+ggsave("Coho_HM.png",p,width = 5, height = 3.5, units = "in")
 
 
 newdat%>%dplyr::select(Gear_cap,Barb_cap,HM)%>%pivot_wider(names_from = Barb_cap,values_from = HM)%>%mutate(Barb_odds=Yes/No)
@@ -525,7 +527,7 @@ newdat<-expand.grid(
   Treatment_cap = "Treatment"
   )%>%
   as_tibble()%>%
-  filter(!(Gear_cap == "L" & Barb_cap =="No")) #no fish caught with un-barbed lures
+  filter(!(Gear_cap == "Lure" & Barb_cap =="No")) #no fish caught with un-barbed lures
 
 
 preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
@@ -568,10 +570,14 @@ newdat<-newdat%>%
 newdat%>%print(n=35)
 
 
-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
   geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
   ylab("Hooking Mortality")
+
+print(p)
+ggsave("S_Stlhd_HM.png",p,width = 5, height = 3.5, units = "in")
+
 ```
 # GAM analysis of factors affecting prob of recapture for Winter Steelhead
 
@@ -732,10 +738,13 @@ newdat<-newdat%>%
 newdat%>%print(n=35)
 
 
-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
   geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
   ylab("Hooking Mortality")
+
+print(p)
+ggsave("W_Stlhd_HM.png",p,width = 5, height = 3.5, units = "in")
 ```
 
 # GAM analysis of factors affecting prob of recapture for spring Chinook
@@ -848,7 +857,7 @@ newdat<-expand.grid(
   Treatment_cap = "Treatment"
   )%>%
   as_tibble()%>%
-  filter(!(Gear_cap == "L" & Barb_cap =="No")) #no fish caught with un-barbed lures
+  filter(!(Gear_cap == "Lure" & Barb_cap =="No")) #no fish caught with un-barbed lures
 
 
 preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
@@ -891,10 +900,13 @@ newdat<-newdat%>%
 newdat%>%print(n=35)
 
 
-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
+p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
   geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
   ylab("Hooking Mortality")
+
+print(p)
+ggsave("S_Chnk_HM.png",p,width = 5, height = 3.5, units = "in")
 
 ```
 
