@@ -214,22 +214,6 @@ Things to explore in analysis
       •	Drop by run_year in following term: ti(RKM_cap,DOY_cap,by=run_year_cap,bs="ps",k=4)
 
 
-```{r inelegant solutions}
-
-#Solution to replace NAs in the control dataset with "Control"
-#Apparently "across()" is currently bugged out, test solutions on github and stack do not work even with the example dfs
-
-# replace_control = function(x){
-#   ifelse(is.na(x), "Control",x)
-# }
-# 
-# test = filter(dat, Treatment_cap == "Control")  %>%
-#   mutate_all( ~replace_control(.x)) %>%
-#   bind_rows(dat, Treatment_cap == "Control")
-
-
-```
-
 # GAM analysis of factors affecting prob of recapture for control Coho
 ```{r GAM analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
 treatvars = dat %>%
@@ -284,13 +268,12 @@ cdat%>%
 
 
 
-
-
-
 m1<-gam(rec ~ 
           1
           #Effects Shared by T & C
           + s(survey_ID_cap, bs ="re")
+          + s(DOY_cap,run_year_cap,bs="fs")
+          #+ s(Temp_C_cap)+
           + s(DOY_cap,run_year_cap,bs="fs")
 
           # Treatment effects
@@ -324,7 +307,7 @@ newdat<-expand.grid(
   )%>%
   as_tibble()
 
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = '(survey_ID_cap,bs="re",m=1)'))%>%
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", exclude = 's(survey_ID_cap)'))%>%
   as_tibble()
 
 newdat<-newdat%>%
@@ -389,7 +372,6 @@ newdat<-newdat%>%
          HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
          HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
          )%>%
-  mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))%>%
   ungroup()
 
 
@@ -402,6 +384,20 @@ p<-ggplot(newdat, aes(x=Gear_cap, fill=Barb_cap)) +
   ylab("Hooking Mortality")
 print(p)
 ggsave("Coho_HM.png",p,width = 5, height = 3.5, units = "in")
+
+
+p<-ggplot(newdat%>%mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))
+          , aes(x=Gear_cap, y=HM, color=Barb_cap)) +
+  geom_errorbar(aes(ymax = HM_U95,ymin = HM_L95,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_linerange(aes(ymax = HM_U50,ymin = HM_L50,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  geom_point(aes(color=Barb_cap),size=8,position = position_dodge(0.3))+
+  #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
+  geom_hline(yintercept=0)+
+  ylab("Hooking Mortality")+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p)
+ggsave("Coho_HM_pointrange.png",p,width = 5, height = 3.5, units = "in")
 
 
 newdat%>%dplyr::select(Gear_cap,Barb_cap,HM)%>%pivot_wider(names_from = Barb_cap,values_from = HM)%>%mutate(Barb_odds=Yes/No)
@@ -462,6 +458,7 @@ m1<-gam(rec ~
           + s(DOY_cap,run_year_cap,bs="fs")
           + s(RKM_cap,run_year_cap,bs="fs")
           + ti(RKM_cap,DOY_cap,m=2,k=c(5))
+          #+ s(Temp_C_cap)
 
           #+ Treatment_cap
           + Gear_cap
@@ -631,6 +628,7 @@ m1<-gam(rec ~
           + s(DOY_cap,run_year_cap,bs="fs")
           + s(RKM_cap,run_year_cap,bs="fs",k=3)
           + ti(RKM_cap,DOY_cap,m=2,k=c(3))
+          #+ s(Temp_C_cap)
 
           #+ Treatment_cap
           + Gear_cap
@@ -799,6 +797,7 @@ m1<-gam(rec ~
           # Effects Shared by T & C
           + s(survey_ID_cap,bs="re")
           + s(DOY_cap,run_year_cap,bs="fs")
+          #+ Temp_C_cap
 
           # Treatment effects
           #+ Treatment_cap
