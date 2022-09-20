@@ -33,7 +33,7 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom") 
+packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects","mbend") 
 install_or_load_pack(pack = packages_list)
 #remove.packages(c("StanHeaders", "rstan","RcppParallel"))
 #install.packages("rstan", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
@@ -247,7 +247,7 @@ cdat<-dat%>%
          )%>%
   mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
   mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
-  filter(!Gear_cap%in%c("Baited Lure")) #F
+  filter(!Gear_cap%in%c("Baited Lure","Fly")) #F
 
   #mutate(across(treatvars, ~tidyr::replace_na(., "Control")))%>%
   #mutate(across(c(Gear_cap, Barb_cap), ~ fct_relevel(.,"Control",after=0)))%>%
@@ -268,23 +268,43 @@ cdat%>%
 
 
 
-m1<-gam(rec ~ 
+# m1<-brm(rec ~
+#           1
+#           #Effects Shared by T & C
+#           + (1 | survey_ID_cap)
+#           + s(DOY_cap,run_year_cap,bs="fs")
+#           #+ s(Temp_C_cap)+
+# 
+#           # Treatment effects
+#           #+ Treatment_cap
+#           + Gear_cap : Barb_cap
+#           #+ HookType_cap : HookSize_cap
+#           ,family = bernoulli(link="logit")
+#           ,data=cdat
+#           #,method = "REML"
+#           ,cores = 4
+#           ,chains=4
+#           ,iter=2000
+#           ,warmup = 1000
+#     )
+# 
+# saveRDS(m1,"m1.rds")
+
+m1<-gam(rec ~
           1
           #Effects Shared by T & C
-          + s(survey_ID_cap, bs ="re")
+          + s(survey_ID_cap,bs="re")
           + s(DOY_cap,run_year_cap,bs="fs")
           #+ s(Temp_C_cap)+
-          + s(DOY_cap,run_year_cap,bs="fs")
 
           # Treatment effects
           #+ Treatment_cap
-          + Gear_cap
-          + Barb_cap
           + Gear_cap : Barb_cap
           #+ HookType_cap : HookSize_cap
+          #,family = binomial(link="logit")
           ,family = binomial(link="logit")
           ,data=cdat
-          ,method = "REML"
+          #,method = "REML"
     )
 
 # cat("\\begin{verbatim}")
@@ -328,8 +348,8 @@ ggsave("Coho_Space_Time.png",p,width = 5, height = 3.5, units = "in")
 newdat<-expand.grid(
   #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
   #run_year_cap = unique(cdat$run_year_cap),
-  DOY_cap = 0,
-  run_year_cap = 0,
+  DOY_cap = median(cdat$DOY_cap),
+  run_year_cap = 2018,
   survey_ID_cap = 0,
   Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
   Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
@@ -337,10 +357,6 @@ newdat<-expand.grid(
   )%>%
   as_tibble()%>%
   filter(!(Gear_cap == "Fly" & Barb_cap =="No")) #no fish caught with un-barbed flies
-
-
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
-  as_tibble()
 
 newdat2<-
     tibble(
@@ -352,56 +368,79 @@ newdat2<-
       Treatment_cap = "Control"
     )
 
-preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
-  as_tibble()
+newdat<-newdat%>%bind_rows(newdat2)
 
-newdat<-newdat%>%
-  bind_cols(preds)
-
-newdat2<-newdat2%>%
-  bind_cols(preds2)%>%
-  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+# preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+#   as_tibble()
 
 
-newdat<-newdat%>%
-  tidyr::crossing(newdat2)%>%
+preds<-gam_pred_ints_v2(fit_gam=m1,new_dat = newdat,quants=c(0.025,0.25,0.5,0.75,0.975),filter = "s.")$preds%>%
+  t()%>%
+  as_tibble()%>%
   rowwise()%>%
-  mutate(HM = 1 - ilogit(preds.fit)/ilogit(control.fit),
-         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
-         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
-         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
-         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
-         )%>%
-  ungroup()
+  mutate(`1`=`1`/`7`,`2`=`2`/`7`,`3`=`3`/`7`,`4`=`4`/`7`,`5`=`5`/`7`,`6`=`6`/`7`)%>%
+  dplyr::select(-`7`)%>%
+  mutate(across(everything(),~ 1-.))
+
+barb_preds<-newdat%>%
+  dplyr::select(Gear_cap)%>%
+  filter(Gear_cap!="Control")%>%
+  group_by(Gear_cap)%>%
+  summarise(n=n())%>%
+  dplyr::select(-n)%>%
+  bind_cols(t(apply((1-preds[,1:3])/(1-preds[,4:6]),2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))
+  
 
 
-newdat%>%print(n=35)
+HM_dat<-newdat%>%
+  filter(Gear_cap!="Control")%>%
+  bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
+  mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
 
-p<-ggplot(newdat, aes(x=Gear_cap, fill=Barb_cap)) +
-  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
-  geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")
-print(p)
-ggsave("Coho_HM.png",p,width = 5, height = 3.5, units = "in")
-
-
-p<-ggplot(newdat%>%mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))
-          , aes(x=Gear_cap, y=HM, color=Barb_cap)) +
-  geom_errorbar(aes(ymax = HM_U95,ymin = HM_L95,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
-  geom_linerange(aes(ymax = HM_U50,ymin = HM_L50,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
-  geom_point(aes(color=Barb_cap),size=8,position = position_dodge(0.3))+
+p1<-ggplot(HM_dat
+          , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  geom_point(aes(color=Barb_cap),size=4,position = position_dodge(0.3))+
   #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
   ylab("Hooking Mortality")+
   theme_bw()+
   scale_y_continuous(labels = scales::percent)
-print(p)
-ggsave("Coho_HM_pointrange.png",p,width = 5, height = 3.5, units = "in")
+print(p1)
+ggsave("Coho_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
+
+p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
+          , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
+  geom_point(size=4,position = position_dodge(0.3),color="cadetblue")+
+  geom_hline(yintercept=1)+
+  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #scale_y_log10()+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p2)
+ggsave("Coho_barb_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
+
+p3<-grid.arrange(p1,p2,nrow=1)
+print(p3)
+ggsave("Coho_both_pointrange.png",p3,width = 8.5, height = 3.5, units = "in")
+
+HM_dat%>%
+  dplyr::select(-DOY_cap,-run_year_cap,-survey_ID_cap,-Treatment_cap,Gear=Gear_cap,Barb = Barb_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+barb_preds%>%
+  dplyr::select(Gear=Gear_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
 
 
-newdat%>%dplyr::select(Gear_cap,Barb_cap,HM)%>%pivot_wider(names_from = Barb_cap,values_from = HM)%>%mutate(Barb_odds=Yes/No)
-#main effect of barbs: 1) fit full model, 2) ilogit (intercept + main barb yes)/ ilogit (intercept + main barb no)
 
 #controls could be poor
   # location (boat launch vs. pool)
@@ -461,9 +500,7 @@ m1<-gam(rec ~
           #+ s(Temp_C_cap)
 
           #+ Treatment_cap
-          + Gear_cap
-          #+ Gear_cap : Barb_cap #only one gear with both barb and no-barb
-          + Barb_cap
+          + Gear_cap : Barb_cap #only one gear with both barb and no-barb
         
           ,family = binomial(link="logit")
           ,data=cdat
@@ -515,65 +552,99 @@ ggplot(newdat%>%filter(DOY_cap==200),aes(x=RKM_cap,y=preds,color=run_year_cap))+
 newdat<-expand.grid(
   #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
   #run_year_cap = unique(cdat$run_year_cap),
-  DOY_cap = 0,
-  run_year_cap = 0,
+  RKM_cap = median(cdat$RKM_cap,na.rm = T),
+  DOY_cap = median(cdat$DOY_cap,na.rm = T),
+  run_year_cap = 2018,
   survey_ID_cap = 0,
-  RKM_cap = 0,
   Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
   Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
   Treatment_cap = "Treatment"
   )%>%
   as_tibble()%>%
-  filter(!(Gear_cap == "Lure" & Barb_cap =="No")) #no fish caught with un-barbed lures
-
-
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
-  as_tibble()
+  filter(!(Gear_cap == "Lure")) #no fish caught with un-barbed flies
 
 newdat2<-
     tibble(
+      RKM_cap =median(cdat$RKM_cap,na.rm = T),
       DOY_cap = 0,
       run_year_cap = 0,
       survey_ID_cap = 0,
-      RKM_cap = 0,
       Gear_cap = "Control",
       Barb_cap ="Control",
       Treatment_cap = "Control"
     )
 
-preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
-  as_tibble()
+newdat<-newdat%>%bind_rows(newdat2)
 
-newdat<-newdat%>%
-  bind_cols(preds)
-
-newdat2<-newdat2%>%
-  bind_cols(preds2)%>%
-  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+# preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+#   as_tibble()
 
 
-newdat<-newdat%>%
-  tidyr::crossing(newdat2)%>%
+preds<-gam_pred_ints_v2(fit_gam=m1,new_dat = newdat,quants=c(0.025,0.25,0.5,0.75,0.975),filter = "s.")$preds%>%
+  t()%>%
+  as_tibble()%>%
   rowwise()%>%
-  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
-         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
-         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
-         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
-         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
-         )%>%
-  ungroup()
+  mutate(`1`=`1`/`3`,`2`=`2`/`3`)%>%
+  dplyr::select(-`3`)%>%
+  mutate(across(everything(),~ 1-.))
+
+barb_preds<-newdat%>%
+  dplyr::select(Gear_cap)%>%
+  filter(Gear_cap!="Control")%>%
+  group_by(Gear_cap)%>%
+  summarise(n=n())%>%
+  dplyr::select(-n)%>%
+  bind_cols(t(apply((1-preds[,1])/(1-preds[,2]),2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))
+  
 
 
-newdat%>%print(n=35)
+HM_dat<-newdat%>%
+  filter(Gear_cap!="Control")%>%
+  bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
+  mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
 
-p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
-  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+p1<-ggplot(HM_dat
+          , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  geom_point(aes(color=Barb_cap),size=6,position = position_dodge(0.3))+
+  #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")
+  ylab("Hooking Mortality")+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p1)
+ggsave("S_Stlhd_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
 
-print(p)
-ggsave("S_Stlhd_HM.png",p,width = 5, height = 3.5, units = "in")
+p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
+          , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
+  geom_point(size=6,position = position_dodge(0.3),color="cadetblue")+
+  geom_hline(yintercept=1)+
+  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #scale_y_log10()+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p2)
+ggsave("S_Stlhd__barbs_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
+
+p3<-grid.arrange(p1,p2,nrow=1)
+print(p3)
+ggsave("S_Stlh_both_pointrange.png",p3,width = 8.5, height = 3.5, units = "in")
+
+HM_dat%>%
+  dplyr::select(-DOY_cap,-RKM_cap,-run_year_cap,-survey_ID_cap,-Treatment_cap,Gear=Gear_cap,Barb = Barb_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+barb_preds%>%
+  dplyr::select(Gear=Gear_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
 
 ```
 # GAM analysis of factors affecting prob of recapture for Winter Steelhead
@@ -631,9 +702,8 @@ m1<-gam(rec ~
           #+ s(Temp_C_cap)
 
           #+ Treatment_cap
-          + Gear_cap
-          + Gear_cap : Barb_cap
-          + Barb_cap
+          + Gear_cap 
+
         
           ,family = binomial(link="logit")
           ,data=cdat
@@ -685,10 +755,10 @@ ggplot(newdat%>%filter(DOY_cap==100),aes(x=RKM_cap,y=preds,color=run_year_cap))+
 newdat<-expand.grid(
   #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
   #run_year_cap = unique(cdat$run_year_cap),
-  DOY_cap = 0,
-  run_year_cap = 0,
-  survey_ID_cap = 0,
   RKM_cap = 0,
+  DOY_cap = median(cdat$DOY_cap,na.rm = T),
+  run_year_cap = 2018,
+  survey_ID_cap = 0,
   Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
   Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
   Treatment_cap = "Treatment"
@@ -696,53 +766,91 @@ newdat<-expand.grid(
   as_tibble()
 
 
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
-  as_tibble()
-
 newdat2<-
     tibble(
+      RKM_cap=0,
       DOY_cap = 0,
       run_year_cap = 0,
       survey_ID_cap = 0,
-      RKM_cap = 0,
       Gear_cap = "Control",
       Barb_cap ="Control",
       Treatment_cap = "Control"
     )
 
-preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(DOY_cap,run_year_cap)","s(RKM_cap,run_year_cap)","ti(RKM_cap,DOY_cap)")))%>% 
+newdat<-newdat%>%bind_rows(newdat2)
+
+preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "response", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)","s(run_year_cap)","ti(RKM_cap,DOY_cap)")))%>%
   as_tibble()
 
-newdat<-newdat%>%
+newdat%>%
   bind_cols(preds)
 
-newdat2<-newdat2%>%
-  bind_cols(preds2)%>%
-  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
 
-
-newdat<-newdat%>%
-  tidyr::crossing(newdat2)%>%
+preds<-gam_pred_ints_v2(fit_gam=m1,new_dat = newdat,quants=c(0.025,0.25,0.5,0.75,0.975),filter = "s.")$preds%>%
+  t()%>%
+  as_tibble()%>%
   rowwise()%>%
-  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
-         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
-         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
-         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
-         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
-         )%>%
-  ungroup()
+  mutate(`1`=`1`/`9`,`2`=`2`/`9`,`3`=`3`/`9`,`4`=`4`/`9`,`5`=`5`/`9`,`6`=`6`/`9`,`7`=`7`/`9`,`8`=`8`/`9`)%>%
+  dplyr::select(-`9`)%>%
+  mutate(across(everything(),~ 1-.))
+
+barb_preds<-newdat%>%
+  dplyr::select(Gear_cap)%>%
+  filter(Gear_cap!="Control")%>%
+  group_by(Gear_cap)%>%
+  summarise(n=n())%>%
+  dplyr::select(-n)%>%
+  bind_cols(t(apply((1-preds[,1])/(1-preds[,2]),2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))
+  
 
 
-newdat%>%print(n=35)
+HM_dat<-newdat%>%
+  filter(Gear_cap!="Control")%>%
+  bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
+  mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
 
-p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
-  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+p1<-ggplot(HM_dat
+          , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  geom_point(aes(color=Barb_cap),size=6,position = position_dodge(0.3))+
+  #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")
+  ylab("Hooking Mortality")+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p1)
+ggsave("W_Stlhd_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
 
-print(p)
-ggsave("W_Stlhd_HM.png",p,width = 5, height = 3.5, units = "in")
+p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
+          , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
+  geom_point(size=6,position = position_dodge(0.3),color="cadetblue")+
+  geom_hline(yintercept=1)+
+  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #scale_y_log10()+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p2)
+ggsave("W_Stlhd__barbs_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
+
+p3<-grid.arrange(p1,p2,nrow=1)
+print(p3)
+ggsave("W_Stlhd_both_pointrange.png",p3,width = 8.5, height = 3.5, units = "in")
+
+HM_dat%>%
+  dplyr::select(-DOY_cap,-run_year_cap,-survey_ID_cap,-Treatment_cap,Gear=Gear_cap,Barb = Barb_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+barb_preds%>%
+  dplyr::select(Gear=Gear_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
 ```
 
 # GAM analysis of factors affecting prob of recapture for spring Chinook
@@ -848,19 +956,15 @@ ggplot(newdat,aes(x=DOY_cap,y=preds,color=run_year_cap))+
 newdat<-expand.grid(
   #DOY_cap = seq(from=min(cdat$DOY_cap),to=max(cdat$DOY_cap)),
   #run_year_cap = unique(cdat$run_year_cap),
-  DOY_cap = 0,
-  run_year_cap = 0,
+  DOY_cap = median(cdat$DOY_cap),
+  run_year_cap = 2018,
   survey_ID_cap = 0,
   Gear_cap = cdat%>%dplyr::select(Gear_cap)%>%filter(Gear_cap!="Control")%>%unique()%>%pluck("Gear_cap"),
   Barb_cap = cdat%>%dplyr::select(Barb_cap)%>%filter(Barb_cap!="Control")%>%unique()%>%pluck("Barb_cap"),
   Treatment_cap = "Treatment"
   )%>%
   as_tibble()%>%
-  filter(!(Gear_cap == "Lure" & Barb_cap =="No")) #no fish caught with un-barbed lures
-
-
-preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
-  as_tibble()
+  filter(!(Gear_cap == "Lure")) #no fish caught with un-barbed flies
 
 newdat2<-
     tibble(
@@ -872,40 +976,77 @@ newdat2<-
       Treatment_cap = "Control"
     )
 
-preds2=data.frame(preds=predict(newdata=newdat2,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
-  as_tibble()
+newdat<-newdat%>%bind_rows(newdat2)
 
-newdat<-newdat%>%
-  bind_cols(preds)
-
-newdat2<-newdat2%>%
-  bind_cols(preds2)%>%
-  dplyr::select(control.fit=preds.fit,control.se.fit=preds.se.fit)
+# preds=data.frame(preds=predict(newdata=newdat,m1,var="preds",type = "link", se.fit=T, exclude = c("s(survey_ID_cap)", "s(run_year_cap)","s(DOY_cap,run_year_cap)")))%>% 
+#   as_tibble()
 
 
-newdat<-newdat%>%
-  tidyr::crossing(newdat2)%>%
+preds<-gam_pred_ints_v2(fit_gam=m1,new_dat = newdat,quants=c(0.025,0.25,0.5,0.75,0.975),filter = "s.")$preds%>%
+  t()%>%
+  as_tibble()%>%
   rowwise()%>%
-  mutate(HM = 1-ilogit(preds.fit)/ilogit(control.fit),
-         HM_L50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.25),
-         HM_U50 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.75),
-         HM_L95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.025),
-         HM_U95 = quantile(1-(ilogit(rnorm(n=10000,preds.fit,preds.se.fit))/ilogit(rnorm(10000,control.fit,control.se.fit))),0.975),
-         )%>%
-  mutate(across(c(HM,HM_L50,HM_U50,HM_L95,HM_U95),~ifelse(. < 0,0,.)))%>%
-  ungroup()
+  mutate(`1`=`1`/`3`,`2`=`2`/`3`)%>%
+  dplyr::select(-`3`)%>%
+  mutate(across(everything(),~ 1-.))
+
+barb_preds<-newdat%>%
+  dplyr::select(Gear_cap)%>%
+  filter(Gear_cap!="Control")%>%
+  group_by(Gear_cap)%>%
+  summarise(n=n())%>%
+  dplyr::select(-n)%>%
+  bind_cols(t(apply((1-preds[,1])/(1-preds[,2]),2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))
+  
 
 
-newdat%>%print(n=35)
+HM_dat<-newdat%>%
+  filter(Gear_cap!="Control")%>%
+  bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
+  mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
 
-p<-ggplot(newdat%>%filter(Gear_cap!="F"), aes(x=Gear_cap, fill=Barb_cap)) +
-  geom_boxplot(aes(ymin = HM_L95, lower = HM_L50, middle = HM, upper = HM_U50, ymax = HM_U95),stat="identity")+
+p1<-ggplot(HM_dat
+          , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  geom_point(aes(color=Barb_cap),size=6,position = position_dodge(0.3))+
+  #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")
+  ylab("Hooking Mortality")+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p1)
+ggsave("Sp_Chinook_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
 
-print(p)
-ggsave("S_Chnk_HM.png",p,width = 5, height = 3.5, units = "in")
+p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
+          , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
+  geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
+  geom_point(size=6,position = position_dodge(0.3),color="cadetblue")+
+  geom_hline(yintercept=1)+
+  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #scale_y_log10()+
+  theme_bw()+
+  scale_y_continuous(labels = scales::percent)
+print(p2)
+ggsave("Sp_Chinook__barbs_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
+
+p3<-grid.arrange(p1,p2,nrow=1)
+print(p3)
+ggsave("Sp_Chinook_both_pointrange.png",p3,width = 8.5, height = 3.5, units = "in")
+
+HM_dat%>%
+  dplyr::select(-DOY_cap,-run_year_cap,-survey_ID_cap,-Treatment_cap,Gear=Gear_cap,Barb = Barb_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+barb_preds%>%
+  dplyr::select(Gear=Gear_cap,`2.5%`,`25%`,`50%`,`75%`,`97.5%`)%>%
+  mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
+  kbl(caption = NULL,digits =0)%>%
+  kable_classic(full_width = F, html_font = "Cambria")
 
 ```
 
