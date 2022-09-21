@@ -397,29 +397,37 @@ HM_dat<-newdat%>%
   bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
   mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
 
 p1<-ggplot(HM_dat
           , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
-  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.3)+
+  #geom_errorbar(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.15)+
   geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
   geom_point(aes(color=Barb_cap),size=4,position = position_dodge(0.3))+
   #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")+
-  theme_bw()+
+  labs(x = "",  y="Hooking Mortality", color = "Barbed")+
+  #theme_bw()+
   scale_y_continuous(labels = scales::percent)
 print(p1)
 ggsave("Coho_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
 
 p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
           , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
-  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.25,color="cadetblue")+
+  #geom_errorbar(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=1,position = position_dodge(0.3), width = 0.1)+
   geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
   geom_point(size=4,position = position_dodge(0.3),color="cadetblue")+
   geom_hline(yintercept=1)+
-  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #ylab("Ratio of Barbed to Unbarbed Survival")+
+  labs(x="", y= "Ratio of Barbed to Unbarbed Survival")+
   #scale_y_log10()+
-  theme_bw()+
+  #theme_bw()+
   scale_y_continuous(labels = scales::percent)
 print(p2)
 ggsave("Coho_barb_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
@@ -1005,16 +1013,23 @@ HM_dat<-newdat%>%
   bind_cols(t(apply(preds,2,function(x) quantile(x,c(0.025,0.25,0.5,0.75,0.975)))))%>%
   mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifelse(. < 0,0,.)))
 
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
 
 p1<-ggplot(HM_dat
           , aes(x=Gear_cap, y=`50%`, color=Barb_cap)) +
-  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.2)+
+  geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.3)+
   geom_linerange(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=2.5,position = position_dodge(0.3))+
+  #geom_errorbar(aes(ymax = `75%`,ymin = `25%`,color=Barb_cap),size=1,position = position_dodge(0.3),width = 0.15)+
   geom_point(aes(color=Barb_cap),size=6,position = position_dodge(0.3))+
   #geom_boxplot(aes(ymin = HM_L95, , middle = HM, , ymax = HM_U95),stat="identity")+
   geom_hline(yintercept=0)+
-  ylab("Hooking Mortality")+
-  theme_bw()+
+  #ylab("Hooking Mortality")+
+  labs(x = "", y = "Hooking Mortality", color = "Barbed")+
+  #theme_bw()+
   scale_y_continuous(labels = scales::percent)
 print(p1)
 ggsave("Sp_Chinook_HM_pointrange.png",p1,width = 5, height = 3.5, units = "in")
@@ -1023,11 +1038,13 @@ p2<-ggplot(barb_preds#%>%mutate(across(c(`50%`,`25%`,`75%`,`2.5%`,`97.5%`),~ifel
           , aes(x=Gear_cap, y=`50%`),color="cadetblue") +
   geom_errorbar(aes(ymax = `97.5%`,ymin = `2.5%`),size=1,position = position_dodge(0.3),width = 0.2,color="cadetblue")+
   geom_linerange(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=2.5,position = position_dodge(0.3))+
+  #geom_errorbar(aes(ymax = `75%`,ymin = `25%`),color="cadetblue",size=1,position = position_dodge(0.3), width = 0.1)+
   geom_point(size=6,position = position_dodge(0.3),color="cadetblue")+
   geom_hline(yintercept=1)+
-  ylab("Ratio of Barbed to Unbarbed Survival")+
+  #ylab("Ratio of Barbed to Unbarbed Survival")+
+  labs(x = "", y="Ratio of Barbed to Unbarbed Survival")+
   #scale_y_log10()+
-  theme_bw()+
+  #theme_bw()+
   scale_y_continuous(labels = scales::percent)
 print(p2)
 ggsave("Sp_Chinook__barbs_pointrange.png",p2,width = 3.5, height = 3.5, units = "in")
