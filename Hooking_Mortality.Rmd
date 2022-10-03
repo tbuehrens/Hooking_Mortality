@@ -33,7 +33,7 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects","mbend") 
+packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects", "brmsmargins") 
 install_or_load_pack(pack = packages_list)
 #remove.packages(c("StanHeaders", "rstan","RcppParallel"))
 #install.packages("rstan", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
@@ -453,6 +453,111 @@ barb_preds%>%
 #controls could be poor
   # location (boat launch vs. pool)
   # extra handling/trucking
+```
+
+```{r BRMS analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
+treatvars = dat %>%
+  dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+  names()
+
+Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
+
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter( time > 0)%>%
+  dplyr::select(
+    rec,
+    time,
+    Treatment_cap,
+    Fish_ID,
+    run_year_cap,
+    DOY_cap,
+    Temp_C_cap,
+    Release_Location_cap,
+    Capture_Location_recap,
+    survey_ID_cap,
+    all_of(treatvars)
+                )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(across(all_of(treatvars), ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(all_of(treatvars), ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly")) #F
+
+
+brm1 = brms::brm(rec ~
+          1
+          #Effects Shared by T & C
+          + (1 | survey_ID_cap)
+          + s(DOY_cap,run_year_cap,bs="fs")
+          #+ s(Temp_C_cap)+
+
+          # Treatment effects
+          #+ Treatment_cap
+          + Gear_cap : Barb_cap
+          #+Barb_cap
+          #+ HookType_cap : HookSize_cap
+          ,family = bernoulli(link="logit")
+          ,data=cdat
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=5000
+          ,thin = 5
+          ,warmup = 500
+          ,prior = set_prior(horseshoe(df = 1, par_ratio = 0.5), class="b")
+    )
+
+summary(brm1)
+
+
+
+#mf$Summary[2,1]/mf$Summary[3,1]
+
+plot(conditional_effects(brm1), points = T, ask = F)
+
+#Marginal effects
+#Barb
+mbarb = brmsmargins(brm1, at = data.frame(Barb_cap = c( "Control","No","Yes")), effects = "fixedonly")
+#names(mbarb$Posterior) = c("Control","No","Yes")
+
+mbarb_dist = as.tibble(mbarb$Posterior) %>%
+  rename(control = V1,
+         no = V2,
+         yes = V3) %>%
+  mutate(surv_nobarb = no/control,
+         surv_barb = yes/control) %>%
+  ggplot() +
+  geom_density(aes(surv_nobarb), fill = "blue", alpha = 0.5)+
+  geom_density(aes(surv_barb), fill= "red", alpha = 0.5)+
+  xlim(0.9,1.1)
+#gear
+mgear = brmsmargins(brm1, at = data.frame(Gear_cap = c("Control", "Bait","Jig","Lure")), effects = "fixedonly")
+
+#gear and barb
+meff = brmsmargins(brm1, at = data.frame(Gear_cap = c("Control", rep(c("Bait","Jig","Lure"),2)), Barb_cap = c("Control",rep(c("No","Yes"), 3)))) 
+
+meff_dist = as.tibble(meff$Posterior) %>%
+  rename(control = V1,
+         bait_no = V2,
+         jig_no = V3,
+         lure_no = V4,
+         bait_barb = V5,
+         jig_barb = V6,
+         lure_barb = V7
+         ) %>%
+  pivot_longer(cols = bait_no:lure_barb) %>%
+  mutate(gear = word(name, sep = "_",1),
+         barb = word(name, sep = "_",-1)) %>%
+  ggplot()+
+  geom_violin(aes(x = gear, y = value/control, fill = barb))+
+  ylim(.9,1.1)
+
 ```
 
 # GAM analysis of factors affecting prob of recapture for Summer Steelhead
