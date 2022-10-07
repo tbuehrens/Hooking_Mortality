@@ -11,7 +11,7 @@ ind.fun = function(x){
 
 covComb = function(dat=cdat, covars=covars){
   level = cdat %>%
-    dplyr::select(covars) %>%
+    dplyr::select(all_of(covars)) %>%
     apply(2,unique) %>%
     cross_df()
   

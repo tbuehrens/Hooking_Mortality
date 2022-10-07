@@ -498,7 +498,7 @@ modname = c("treatonly", "gear_barb", "full")[1]
 priorname = c("hs", "hs_secondaryeffs")[1]
 re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
 covars = c("Treatment_cap", "Gear_cap")
-formula = as.formula(paste('rec ~ 1 + ', paste(re, covars, collapse = ' + ')))
+formula = as.formula(paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(covars, collapse = ' + ')))
 
 #Check if this model permutation has been run, and if so load the output
 if(!file.exists((paste0("results/", modname,"_",priorname,".rds")))){
@@ -515,14 +515,15 @@ brm_coho = brms::brm(formula
           ,prior = set_prior(horseshoe(df = 1, par_ratio = 0.5), class="b") #horseshoe or similar prior is required, fixed effects do not converge with diffuse priors (eg normal, uniform) 
     )
 #save results
-saveRDS(brm_coho, file = here(paste0("results/", modname,"_",priorname,".rds")))
+saveRDS(brm_coho, file = here(paste0("results/","coho_", modname,"_",priorname,".rds")))
 }else{
-  brm_coho<-readRDS(here(paste0("results/", modname,"_",priorname,".rds")))
+  brm_coho<-readRDS(here(paste0("results/","coho_", modname,"_",priorname,".rds")))
 }
 
 #data summaries, predictions, tables, figures
 summary(brm_coho)
 
+if(!file.exists(here(paste0("results/",modname,"_",priorname,"_modeloutputs",".rda")))){
 mod_effplots = plot(conditional_effects(brm_coho), points = T, ask = F)
 
 #Marginal effects using brmsmargins
@@ -577,14 +578,33 @@ geom_violin()+
 
 if("Gear_cap" %in% covars){
   if("HookSize_cap" %in% covars){
+    gear_hooksize_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = HookSize_cap))+
+      geom_violin()+
+      geom_boxplot()
+  }
+  if("Barb_cap" %in% covars){
+    gear_barb_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = Barb_cap))+
+      geom_violin()+
+      geom_boxplot()
     
   }
   gear_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = surv))+
     geom_violin()+
     geom_boxplot()
-  
 }
 
+save(file = here(paste0("results/","coho_",modname,"_",priorname,"_outputs",".rda")),
+     list = intersect(ls(),c("meff_dist",
+                      "meff_quant",
+                      "mod_effplots",
+                      "treat_plot",
+                      "gear_plot",
+                      "gear_hoodsize_plot",
+                      "gear_barb_plot")))
+
+}else{
+  load(here(paste0("results/","coho_",modname,"_",priorname,"_outputs",".rda")))
+}
 
 ### Marginal effects using marginaleffects
 #Issue: finding the average Run year, DOY, and survey ID cap - do these need to be integrated out as done by brmsmargins?
@@ -1036,7 +1056,7 @@ barb_preds%>%
 # GAM analysis of factors affecting prob of recapture for spring Chinook
 
 ONLY use 2018 controls, exlcude all but barrier dam (which means this applies to angled fish too)
-```{r GAM analysis SPCK, results="hold",echo = T, message = T, warning = FALSE }
+```{r GAM analysis SCHK, results="hold",echo = T, message = T, warning = FALSE }
 cdat<-dat%>%
   filter(SpeciesCode_cap=="SCHK" & Treatment_cap %in% c("Control","Treatment"))%>%
   mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
@@ -1239,7 +1259,7 @@ barb_preds%>%
 
 ```
 
-```{r BRMS analysis SPCK, results="hold",echo = T, message = T, warning = FALSE }
+```{r BRMS analysis SCHK, results="hold",echo = T, message = T, warning = FALSE }
 treatvars = dat %>%
   dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
   names()
@@ -1277,18 +1297,16 @@ cdat<-dat%>%
          )
 
 #formula = 
-brm2 = brms::brm(rec ~
-          1
-          #Effects Shared by T & C
-          + (1 | survey_ID_cap)
-          + s(DOY_cap,run_year_cap,bs="fs")
-          #+ s(Temp_C_cap)+
+modname = c("treatonly", "gear_barb", "full")[1]
+priorname = c("hs", "hs_secondaryeffs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c("Treatment_cap", "Gear_cap")
+formula = as.formula(paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(covars, collapse = ' + ')))
 
-          # Treatment effects
-          #+ Treatment_cap
-          + Gear_cap : Barb_cap
-          #+Barb_cap
-          #+ HookType_cap : HookSize_cap
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists((paste0("results/", modname,"_",priorname,".rds")))){
+
+brm_schk = brms::brm(formula
           ,family = bernoulli(link="logit")
           ,data=cdat
           #,method = "REML"
@@ -1299,30 +1317,97 @@ brm2 = brms::brm(rec ~
           ,warmup = 1000
           ,prior = set_prior(horseshoe(df = 1, par_ratio = 0.5), class="b") #horseshoe or similar prior is required, fixed effects do not converge with diffuse priors (eg normal, uniform) 
     )
+#save results
+saveRDS(brm_schk, file = here(paste0("results/","schk_", modname,"_",priorname,".rds")))
+}else{
+  brm_schk<-readRDS(here(paste0("results/","schk_", modname,"_",priorname,".rds")))
+}
 
-summary(brm2)
+#data summaries, predictions, tables, figures
+summary(brm_schk)
 
-plot(conditional_effects(brm2), points = T, ask = F)
+if(!file.exists(here(paste0("results/",modname,"_",priorname,"_modeloutputs",".rda")))){
+mod_effplots = plot(conditional_effects(brm_schk), points = T, ask = F)
 
-meff = brmsmargins(brm2, 
-                   at = data.frame(Gear_cap = c("Control", rep(c("Bait","Lure"),2)), Barb_cap = c("Control",rep(c("No","Yes"), 2))),
+#Marginal effects using brmsmargins
+#generate df of effects
+
+cov_comb = covComb(cdat, covars)
+comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+#calc marginal effects
+meff = brmsmargins(brm_schk, 
+                   at = cov_comb,
                    effects = "integrateoutRE",
                    seed = 425
-                   ) 
+                   )
 
-meff_dist = as.tibble(meff$Posterior) %>%
-  rename(control = V1,
-         bait_no = V2,
-         lure_barb = V3,
-         bait_no = V4,
-         lure_barb = V5
-         ) %>%
-  pivot_longer(cols = bait_no:lure_barb) %>%
-  mutate(gear = word(name, sep = "_",1),
-         barb = word(name, sep = "_",-1)) %>%
-  ggplot()+
-  geom_violin(aes(x = gear, y = value/control, fill = barb))+
-  ylim(.95,1.05)
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+  rename(control = starts_with("Control")) %>%
+  mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  summarize(med = quantile(surv, .5),
+            q95.l = quantile(surv, .025),
+            q95.u = quantile(surv,.975),
+            q90.l = quantile(surv, .05),
+            q90.u = quantile(surv, .95),
+            q80.l = quantile(surv, .1),
+            q80.u = quantile(surv, .9)
+  ) %>%
+  ungroup()
+  
+n_combs = nrow(surv_quant)
+
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+
+if("Treatment_cap" %in% covars){
+treat_plot = ggplot(data = surv_dist, aes(x = Treatment_cap, y = surv))+
+geom_violin()+
+  geom_boxplot()
+}
+
+if("Gear_cap" %in% covars){
+  if("HookSize_cap" %in% covars){
+    gear_hooksize_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = HookSize_cap))+
+      geom_violin()+
+      geom_boxplot()
+  }
+  if("Barb_cap" %in% covars){
+    gear_barb_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = Barb_cap))+
+      geom_violin()+
+      geom_boxplot()
+    
+  }
+  gear_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = surv))+
+    geom_violin()+
+    geom_boxplot()
+}
+
+save(file = here(paste0("results/","schk_",modname,"_",priorname,"_outputs",".rda")),
+     list = intersect(ls(),c("meff_dist",
+                      "meff_quant",
+                      "mod_effplots",
+                      "treat_plot",
+                      "gear_plot",
+                      "gear_hoodsize_plot",
+                      "gear_barb_plot")))
+
+}else{
+  load(here(paste0("results/","schk_",modname,"_",priorname,"_outputs",".rda")))
+}
 
 ```
 
