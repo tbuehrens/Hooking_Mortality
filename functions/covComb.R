@@ -10,14 +10,24 @@ ind.fun = function(x){
 }
 
 covComb = function(dat=cdat, covars=covars){
-  level = cdat %>%
-    dplyr::select(all_of(covars)) %>%
-    apply(2,unique) %>%
-    cross_df()
   
-  out = ind.fun(level) %>%
-    filter(ind == 0 | ind == ncol(level)) %>%
-    dplyr::select(-ind)
+  if(length(covars) > 1){
+    level = cdat %>%
+      dplyr::select(all_of(covars)) %>%
+      apply(2,unique)
+      cross_df()
+      
+    out = ind.fun(level) %>%
+      filter(ind == 0 | ind == ncol(level)) %>%
+      dplyr::select(-ind)
+    
+  }else{
+    out = cdat %>%
+      dplyr::select(all_of(covars)) %>%
+      apply(2,unique)
+  }
+  
+return(out)
 }
 
 

@@ -489,47 +489,62 @@ cdat<-dat%>%
          )%>%
   mutate(across(all_of(treatvars), ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
   mutate(across(all_of(treatvars), ~ fct_relevel(.,"Control",after=0)))%>%
-  filter(!Gear_cap%in%c("Baited Lure","Fly")) #F
+  filter(!Gear_cap%in%c("Baited Lure","Fly")) %>% #F
+  mutate(FightTime_seconds_cap = as.numeric(ifelse(FightTime_seconds_cap == "Control", 0, FightTime_seconds_cap)),
+         Temp_C_cap = as.numeric(ifelse(Temp_C_cap == "Control", 0, Temp_C_cap)))
 
 
 #Model run and output process
 #Designate model name
-modname = c("treatonly", "gear_barb", "full")[1]
-priorname = c("hs", "hs_secondaryeffs")[1]
+modname = c("treatonly","treat_gear", "treat_gear_barb", "full")[4]
+priorname = c("norm","hs", "hs_secondaryeffs")[2]
 re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
-covars = c("Treatment_cap", "Gear_cap")
-formula = as.formula(paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(covars, collapse = ' + ')))
+covars = c("Treatment_cap", "Gear_cap", "Barb_cap", "Temp_C_cap", names(cdat)[c(11:17,19:20)])
+cov_form = c("Treatment_cap", "Gear_cap", "Barb_cap", "Temp_C_cap", names(cdat)[c(11:17,19:20)])
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+# formula = bf(rec ~ 1 + (1| survey_ID_cap) + s(DOY_cap,run_year_cap,bs='fs') + a + b, nl = T) +
+#   lf(a ~ Gear_cap:Barb_cap, center = T) +
+#   lf(b ~ 0 + Treatment_cap, cmc = F)
+  
+beta_covs = get_prior(formula = formula
+                      ,data=cdat
+                      ,family = bernoulli(link="logit")) %>%
+  filter(class == "b") %>%
+  as.data.frame() %>%
+  dplyr::select(coef)
+
+  
 
 #Check if this model permutation has been run, and if so load the output
-if(!file.exists((paste0("results/", modname,"_",priorname,".rds")))){
+if(!file.exists(paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))){
 
-brm_coho = brms::brm(formula
-          ,family = bernoulli(link="logit")
+brm_coho = brms::brm(formula = formula
           ,data=cdat
+          ,family = bernoulli(link="logit")
           #,method = "REML"
           ,cores = 4
           ,chains=4
           ,iter=2000
           #,thin = 5
           ,warmup = 1000
-          ,prior = set_prior(horseshoe(df = 1, par_ratio = 0.5), class="b") #horseshoe or similar prior is required, fixed effects do not converge with diffuse priors (eg normal, uniform) 
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.2), class = "b")
     )
-#save results
-saveRDS(brm_coho, file = here(paste0("results/","coho_", modname,"_",priorname,".rds")))
+ #save results
+saveRDS(brm_coho, file = paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))
 }else{
-  brm_coho<-readRDS(here(paste0("results/","coho_", modname,"_",priorname,".rds")))
+  brm_coho<-readRDS(paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))
 }
 
 #data summaries, predictions, tables, figures
 summary(brm_coho)
 
-if(!file.exists(here(paste0("results/",modname,"_",priorname,"_modeloutputs",".rda")))){
+if(!file.exists(paste0(here(),"/results/", "coho_", modname, "_", priorname, "_modeloutputs", ".rda"))){
 mod_effplots = plot(conditional_effects(brm_coho), points = T, ask = F)
 
 #Marginal effects using brmsmargins
 #generate df of effects
 
-cov_comb = covComb(cdat, covars)
+cov_comb = covComb(cdat, covars[-5])
 comb_names = apply(cov_comb, 1, paste, collapse = "_")
 
 #calc marginal effects
@@ -593,7 +608,7 @@ if("Gear_cap" %in% covars){
     geom_boxplot()
 }
 
-save(file = here(paste0("results/","coho_",modname,"_",priorname,"_outputs",".rda")),
+save(file = paste0(here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"),
      list = intersect(ls(),c("meff_dist",
                       "meff_quant",
                       "mod_effplots",
@@ -603,7 +618,7 @@ save(file = here(paste0("results/","coho_",modname,"_",priorname,"_outputs",".rd
                       "gear_barb_plot")))
 
 }else{
-  load(here(paste0("results/","coho_",modname,"_",priorname,"_outputs",".rda")))
+  load(paste0(here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"))
 }
 
 ### Marginal effects using marginaleffects
