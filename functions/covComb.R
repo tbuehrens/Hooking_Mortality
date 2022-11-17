@@ -14,7 +14,8 @@ covComb = function(dat=cdat, covars=covars){
   if(length(covars) > 1){
     level = cdat %>%
       dplyr::select(all_of(covars)) %>%
-      apply(2,unique)
+      apply(2,unique) %>%
+      #as.tibble() %>%
       cross_df()
       
     out = ind.fun(level) %>%

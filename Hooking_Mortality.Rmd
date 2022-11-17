@@ -33,7 +33,7 @@ sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
 # Install & Load Packages
 This section of code will load the packages we need to complete the analysis
 ```{r load packages, results = "hide",echo = T, message = FALSE, warning = FALSE}
-packages_list<-c("plyr","tidyverse","dplyr","lubridate","tidyr","scales","RODBC","MuMIn","RColorBrewer","reshape2","ggplot2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects", "brmsmargins", "here", "purrr") 
+packages_list<-c("tidyverse","lubridate","scales","RODBC","MuMIn","RColorBrewer","reshape2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects", "brmsmargins", "here") 
 install_or_load_pack(pack = packages_list)
 #remove.packages(c("StanHeaders", "rstan","RcppParallel"))
 #install.packages("rstan", repos = c("https://mc-stan.org/r-packages/", getOption("repos")))
@@ -160,6 +160,44 @@ if(!file.exists("data.rds")){
 }else{
   dat<-readRDS("data.rds")
 }
+```
+
+```{r data-management-for-analysis}
+  treatvars = dat %>%
+  dplyr::select(TimeCapture_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+  names()
+
+Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
+
+dat %<>%
+  filter(Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter(time > 0)%>%
+  # dplyr::select(
+  #   rec,
+  #   time,
+  #   Treatment_cap,
+  #   Fish_ID,
+  #   run_year_cap,
+  #   DOY_cap,
+  #   Temp_C_cap,
+  #   Release_Location_cap,
+  #   Capture_Location_recap,
+  #   survey_ID_cap,
+  #   all_of(treatvars)
+  #               )%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  dplyr::mutate(across(all_of(treatvars), ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
+  mutate(across(all_of(treatvars), ~ fct_relevel(.,"Control",after=0)))%>%
+  mutate(FightTime_seconds_cap = as.numeric(ifelse(FightTime_seconds_cap == "Control", 0, FightTime_seconds_cap))
+         #,Temp_C_cap = as.numeric(ifelse(Temp_C_cap == "Control", 0, Temp_C_cap))
+         ,CritHook_cap = ifelse(HookLocation_cap == "Control", "Control", ifelse(HookLocation_cap %in% c("G","E","T","S"), "Critical","Non-critical")))
+
 ```
 # NOTES 
 
@@ -458,49 +496,23 @@ barb_preds%>%
 ```{r BRMS analysis Coho, results="hold",echo = T, message = T, warning = FALSE }
 
 #subset data
-treatvars = dat %>%
-  dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
-  names()
+# treatvars = dat %>%
+#   dplyr::select(TimeCapture_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+#   names()
 
-Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
+# Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
 
 cdat<-dat%>%
-  filter(SpeciesCode_cap=="COHO" & Treatment_cap %in% c("Control","Treatment"))%>%
-  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
-  filter( time > 0)%>%
-  dplyr::select(
-    rec,
-    time,
-    Treatment_cap,
-    Fish_ID,
-    run_year_cap,
-    DOY_cap,
-    Temp_C_cap,
-    Release_Location_cap,
-    Capture_Location_recap,
-    survey_ID_cap,
-    all_of(treatvars)
-                )%>%
-  left_join(Gear_lookup)%>%
-  dplyr::select(-Gear_cap)%>%
-  dplyr::rename(Gear_cap=Gear_LU)%>%
-  mutate(run_year_cap = factor(run_year_cap),
-         Treatment_cap = factor(Treatment_cap)
-         )%>%
-  mutate(across(all_of(treatvars), ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
-  mutate(across(all_of(treatvars), ~ fct_relevel(.,"Control",after=0)))%>%
-  filter(!Gear_cap%in%c("Baited Lure","Fly")) %>% #F
-  mutate(FightTime_seconds_cap = as.numeric(ifelse(FightTime_seconds_cap == "Control", 0, FightTime_seconds_cap)),
-         Temp_C_cap = as.numeric(ifelse(Temp_C_cap == "Control", 0, Temp_C_cap)))
-
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly")) #F
 
 #Model run and output process
 #Designate model name
-modname = c("treatonly","treat_gear", "treat_gear_barb", "full")[4]
+modname = c("treatonly","crithook","treat_gear","gear_barb", "treat_gear_barb","gear:barb_crithook", "treat_gear:barb_crit_fungus", "treat_crithook_REtemp_fl_condtion", "fullCat","full")[2]
 priorname = c("norm","hs", "hs_secondaryeffs")[2]
 re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
-covars = c("Treatment_cap", "Gear_cap", "Barb_cap", "Temp_C_cap", names(cdat)[c(11:17,19:20)])
-cov_form = c("Treatment_cap", "Gear_cap", "Barb_cap", "Temp_C_cap", names(cdat)[c(11:17,19:20)])
+covars = c("CritHook_cap")
+cov_form = c("CritHook_cap")
 formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
 # formula = bf(rec ~ 1 + (1| survey_ID_cap) + s(DOY_cap,run_year_cap,bs='fs') + a + b, nl = T) +
 #   lf(a ~ Gear_cap:Barb_cap, center = T) +
@@ -516,7 +528,7 @@ beta_covs = get_prior(formula = formula
   
 
 #Check if this model permutation has been run, and if so load the output
-if(!file.exists(paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))){
+if(!file.exists(paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))){
 
 brm_coho = brms::brm(formula = formula
           ,data=cdat
@@ -527,24 +539,25 @@ brm_coho = brms::brm(formula = formula
           ,iter=2000
           #,thin = 5
           ,warmup = 1000
-          ,prior = prior(horseshoe(df = 1, par_ratio = 0.2), class = "b")
+          ,control = list(adapt_delta = .98)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
     )
  #save results
-saveRDS(brm_coho, file = paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))
+saveRDS(brm_coho, file = paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))
 }else{
-  brm_coho<-readRDS(paste0(here(),"/results/","coho_", modname,"_",priorname,".rds"))
+  brm_coho<-readRDS(paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))
 }
 
 #data summaries, predictions, tables, figures
 summary(brm_coho)
 
-if(!file.exists(paste0(here(),"/results/", "coho_", modname, "_", priorname, "_modeloutputs", ".rda"))){
+if(!file.exists(paste0(here::here(),"/results/", "coho_", modname, "_", priorname, "_modeloutputs", ".rda"))){
 mod_effplots = plot(conditional_effects(brm_coho), points = T, ask = F)
 
 #Marginal effects using brmsmargins
 #generate df of effects
 
-cov_comb = covComb(cdat, covars[-5])
+cov_comb = covComb(cdat, covars)
 comb_names = apply(cov_comb, 1, paste, collapse = "_")
 
 #calc marginal effects
@@ -559,14 +572,14 @@ colnames(meff_dist) = comb_names
 list = grep("*Control*", comb_names, invert = T, value = T)
 
 surv_dist = pivot_longer(meff_dist, cols = list ) %>%
-  rename(control = starts_with("Control")) %>%
+  dplyr::rename(control = contains("Control")) %>%
   mutate(surv = value/control) %>%
   expandNames(covars, sep = "_")
 
 
 surv_quant = surv_dist %>%
   group_by(name) %>%
-  summarize(med = quantile(surv, .5),
+  dplyr::summarize(med = quantile(surv, .5),
             q95.l = quantile(surv, .025),
             q95.u = quantile(surv,.975),
             q90.l = quantile(surv, .05),
@@ -586,39 +599,43 @@ theme_set(theme_bw()+
 
 
 if("Treatment_cap" %in% covars){
-treat_plot = ggplot(data = surv_dist, aes(x = Treatment_cap, y = surv))+
-geom_violin()+
-  geom_boxplot()
+  treat_plot = ggplot(data = surv_dist, aes(x = Treatment_cap, y = surv))+
+    geom_violin()+
+    geom_boxplot()+
+    coord_cartesian(ylim = c(.9,1.1))
 }
 
 if("Gear_cap" %in% covars){
   if("HookSize_cap" %in% covars){
-    gear_hooksize_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = HookSize_cap))+
+    gear_hooksize_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = surv, fill = HookSize_cap))+
       geom_violin()+
-      geom_boxplot()
+      geom_boxplot()+
+      coord_cartesian(ylim = c(.9,1.1))
   }
   if("Barb_cap" %in% covars){
-    gear_barb_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = value, fill = Barb_cap))+
+    gear_barb_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = surv, fill = Barb_cap))+
       geom_violin()+
-      geom_boxplot()
+      geom_boxplot()+
+      coord_cartesian(ylim = c(.9,1.1))
     
   }
   gear_plot = ggplot(data = surv_dist, aes(x = Gear_cap, y = surv))+
     geom_violin()+
-    geom_boxplot()
+    geom_boxplot()+
+    coord_cartesian(ylim = c(.9,1.1))
 }
 
-save(file = paste0(here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"),
+save(file = paste0(here::here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"),
      list = intersect(ls(),c("meff_dist",
-                      "meff_quant",
+                      "surv_quant",
                       "mod_effplots",
                       "treat_plot",
                       "gear_plot",
-                      "gear_hoodsize_plot",
+                      "gear_hooksize_plot",
                       "gear_barb_plot")))
 
 }else{
-  load(paste0(here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"))
+  load(paste0(here::here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"))
 }
 
 ### Marginal effects using marginaleffects
@@ -658,6 +675,77 @@ save(file = paste0(here(),"/results/","coho_",modname,"_",priorname,"_outputs","
 # mgear = brmsmargins(brm_coho, at = data.frame(Gear_cap = c("Control", "Bait","Jig","Lure")), effects = "fixedonly")
 #   
 
+
+
+```
+
+```{r Coho-crithook-model}
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly"))
+
+cdat_treat = cdat %>%
+  filter(Treatment_cap == "Treatment") %>%
+  mutate(crit_resp = ifelse(CritHook_cap == "Critical", 1, 0))
+
+brm_cohocrit = brm(formula = crit_resp ~ Gear_cap:Method_cap
+          ,data=cdat_treat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          #,control = list(adapt_delta = .98)
+          ,prior = prior(horseshoe(df = 1), class = "b")
+    )
+
+summary(brm_cohocrit)  
+saveRDS(brm_cohocrit, file = "results/coho_crithook_model.rds")
+
+mod_effplots = plot(conditional_effects(brm_cohocrit), points = T, ask = F)
+
+
+cov_comb = covComb(cdat_treat, c("Gear_cap", "Method_cap"))%>%
+  filter(Gear_cap != "Control")
+comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+#calc marginal effects
+meff = brmsmargins(brm_cohocrit, 
+                   at = cov_comb,
+                   #effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = comb_names) %>%
+  #dplyr::rename(control = contains("Control")) %>%
+  #mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+meff_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(med = quantile(value, .5),
+            q95.l = quantile(value, .025),
+            q95.u = quantile(value,.975),
+            q90.l = quantile(value, .05),
+            q90.u = quantile(value, .95),
+            q80.l = quantile(value, .1),
+            q80.u = quantile(value, .9)
+  ) %>%
+  ungroup()
+
+save(mod_effplots, meff_quant,file = "results/coho_crithook_model_gearmethod.rda")
+```
+
+```{r Coho-data-summaries}
+cdat = dat%>%
+  filter(SpeciesCode_cap=="COHO")
 
 
 ```
@@ -861,6 +949,39 @@ barb_preds%>%
   kbl(caption = NULL,digits =0)%>%
   kable_classic(full_width = F, html_font = "Cambria")
 
+```
+
+```{r BRMS-S-steelhead-treatmentonly}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="STLHD" & Treatment_cap %in% c("Treatment"))
+
+modname = c("treatmentfish_full")[1]
+priorname = c("norm","hs", "hs_secondaryeffs")[2]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c(treatvars[-c(1,2,8,11)], "CritHook_cap", "FL_cm_cap", "Temp_C_cap")
+cov_form = c(treatvars[-c(1,2,8,11)],"CritHook_cap", "FL_cm_cap", "Temp_C_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+
+if(!file.exists(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))){
+  
+brm_sthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+saveRDS(brm_sthd, file = paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))
+}else{
+  brm_sthd<-readRDS(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))
+}
+mod_effplots = plot(conditional_effects(brm_sthd), points = T, ask = F)
 ```
 # GAM analysis of factors affecting prob of recapture for Winter Steelhead
 
@@ -1066,6 +1187,85 @@ barb_preds%>%
   mutate(across(c(`2.5%`,`25%`,`50%`,`75%`,`97.5%`), ~ scales::percent(round(.,3))))%>%
   kbl(caption = NULL,digits =0)%>%
   kable_classic(full_width = F, html_font = "Cambria")
+```
+
+```{r BRMS-W-steelhead}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="WSTLHD")
+
+
+
+```
+
+```{r BRMS-W-steelhead-treatmentonly}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap %in% c("Treatment"))
+
+modname = c("treatmentfish_full")[1]
+priorname = c("norm","hs", "hs_secondaryeffs")[2]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c(treatvars[-c(1,2,8,11)], "CritHook_cap", "FL_cm_cap", "Temp_C_cap")
+cov_form = c(treatvars[-c(1,2,8,11)],"CritHook_cap", "FL_cm_cap", "Temp_C_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+
+if(!file.exists(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))){
+  
+brm_wsthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+saveRDS(brm_wsthd, file = paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))
+}else{
+  brm_wsthd<-readRDS(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))
+}
+
+mod_effplots = plot(conditional_effects(brm_wsthd), points = T, ask = F)
+```
+
+```{r W-steelhead-BDanalysis}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap %in% c("Treatment")) %>%
+  mutate(bd_ind = ifelse(Method_cap == "BD", 1,0),
+         Gear_capBait = ifelse(Gear_cap == "Bait", 1,0),
+         Gear_capFly = ifelse(Gear_cap == "Fly", 1,0),
+         Gear_capJig = ifelse(Gear_cap == "Jig", 1,0),
+         CritHook_ind = ifelse(CritHook_cap == "Critical", 1,0))
+
+covars = c("Gear_capBait","Gear_capFly","Gear_capJig", "CritHook_ind", "HookLeftinFish_cap")
+cov_form = c("Gear_capBait","Gear_capFly","Gear_capJig", "CritHook_ind", "HookLeftinFish_cap")
+formula = bf((paste('bd_ind ~ 1 + ','+', paste(cov_form, collapse = ' + '))))
+
+if(!file.exists(paste0(here::here(),"/results/","WinterSTHD_gearcapBD_model.rds"))){
+  
+wsthd_bd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .95)
+          ,prior = prior(horseshoe(df=1, par_ratio = .5), class = "b")
+    )
+saveRDS(wsthd_bd, paste0(here::here(),"/results/","WinterSTHD_gearcapBD_model.rds"))
+
+
+}else{readRDS(paste0(here::here(),"/results/","WinterSTHD_gearcapBD_model.rds"))
+}
+summary(wsthd_bd)
+
+mod_effplots = plot(conditional_effects(wsthd_bd), points = T, ask = F)
 ```
 
 # GAM analysis of factors affecting prob of recapture for spring Chinook
@@ -1275,73 +1475,64 @@ barb_preds%>%
 ```
 
 ```{r BRMS analysis SCHK, results="hold",echo = T, message = T, warning = FALSE }
-treatvars = dat %>%
-  dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
-  names()
-
-Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
+# treatvars = dat %>%
+#   dplyr::select(FightTime_seconds_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+#   names()
+# 
+# Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
 
 cdat<-dat%>%
-  filter(SpeciesCode_cap=="SCHK" & Treatment_cap %in% c("Control","Treatment"))%>%
-  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
-  filter( time > 0)%>%
-  dplyr::select(
-    rec,
-    time,
-    Treatment_cap,
-    Fish_ID,
-    run_year_cap,
-    DOY_cap,
-    RKM_cap,
-    Temp_C_cap,
-    Release_Location_cap,
-    Capture_Location_recap,
-    survey_ID_cap,
-    treatvars
-                )%>%
-  left_join(Gear_lookup)%>%
-  dplyr::select(-Gear_cap)%>%
-  dplyr::rename(Gear_cap=Gear_LU)%>%
-  mutate(run_year_cap = factor(run_year_cap),
-         Treatment_cap = factor(Treatment_cap)
-         )%>%
-  mutate(across(treatvars, ~ ifelse(Treatment_cap == "Control", "Control",.)))%>%
-  mutate(across(treatvars, ~ fct_relevel(.,"Control",after=0)))%>%
+  filter(SpeciesCode_cap=="SCHK") %>%
   filter(run_year_cap == 2018
          & RKM_cap >115
          )
 
-#formula = 
-modname = c("treatonly", "gear_barb", "full")[1]
-priorname = c("hs", "hs_secondaryeffs")[1]
+#Model run and output process
+#Designate model name
+modname = c("treatonly","treat_gear", "treat_gear_barb","treat_gear_barb","gear_barb", "fullCat","full")[4]
+priorname = c("norm","hs", "hs_secondaryeffs")[2]
 re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
-covars = c("Treatment_cap", "Gear_cap")
-formula = as.formula(paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(covars, collapse = ' + ')))
+covars = c("Treatment_cap","Gear_cap", "Barb_cap")
+cov_form = c("Treatment_cap", "Gear_cap","Barb_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+# formula = bf(rec ~ 1 + (1| survey_ID_cap) + s(DOY_cap,run_year_cap,bs='fs') + a + b, nl = T) +
+#   lf(a ~ Gear_cap:Barb_cap, center = T) +
+#   lf(b ~ 0 + Treatment_cap, cmc = F)
+  
+beta_covs = get_prior(formula = formula
+                      ,data=cdat
+                      ,family = bernoulli(link="logit")) %>%
+  filter(class == "b") %>%
+  as.data.frame() %>%
+  dplyr::select(coef)
+
+  
 
 #Check if this model permutation has been run, and if so load the output
-if(!file.exists((paste0("results/", modname,"_",priorname,".rds")))){
+if(!file.exists(paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))){
 
-brm_schk = brms::brm(formula
-          ,family = bernoulli(link="logit")
+brm_schk = brms::brm(formula = formula
           ,data=cdat
+          ,family = bernoulli(link="logit")
           #,method = "REML"
           ,cores = 4
           ,chains=4
           ,iter=2000
           #,thin = 5
           ,warmup = 1000
-          ,prior = set_prior(horseshoe(df = 1, par_ratio = 0.5), class="b") #horseshoe or similar prior is required, fixed effects do not converge with diffuse priors (eg normal, uniform) 
+          ,control = list(adapt_delta = .95)
+          ,prior = prior(horseshoe(df=1, par_ratio = .5), class = "b")
     )
-#save results
-saveRDS(brm_schk, file = here(paste0("results/","schk_", modname,"_",priorname,".rds")))
+ #save results
+saveRDS(brm_schk, file = paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))
 }else{
-  brm_schk<-readRDS(here(paste0("results/","schk_", modname,"_",priorname,".rds")))
+  brm_schk<-readRDS(paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))
 }
 
 #data summaries, predictions, tables, figures
 summary(brm_schk)
 
-if(!file.exists(here(paste0("results/",modname,"_",priorname,"_modeloutputs",".rda")))){
+if(!file.exists(paste0(here::here(),"/results/", "schk_", modname, "_", priorname, "_modeloutputs", ".rda"))){
 mod_effplots = plot(conditional_effects(brm_schk), points = T, ask = F)
 
 #Marginal effects using brmsmargins
@@ -1411,19 +1602,18 @@ if("Gear_cap" %in% covars){
     geom_boxplot()
 }
 
-save(file = here(paste0("results/","schk_",modname,"_",priorname,"_outputs",".rda")),
+save(file = paste0(here::here(),"/results/","schk_",modname,"_",priorname,"_outputs",".rda"),
      list = intersect(ls(),c("meff_dist",
-                      "meff_quant",
+                      "surv_quant",
                       "mod_effplots",
                       "treat_plot",
                       "gear_plot",
-                      "gear_hoodsize_plot",
+                      "gear_hooksize_plot",
                       "gear_barb_plot")))
 
 }else{
-  load(here(paste0("results/","schk_",modname,"_",priorname,"_outputs",".rda")))
+  load(paste0(here::here(),"/results/","schk_",modname,"_",priorname,"_outputs",".rda"))
 }
-
 ```
 
 # Simulation GLM for dummy variable survival analysis
