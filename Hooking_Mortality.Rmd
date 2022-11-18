@@ -688,7 +688,11 @@ cdat_treat = cdat %>%
   filter(Treatment_cap == "Treatment") %>%
   mutate(crit_resp = ifelse(CritHook_cap == "Critical", 1, 0))
 
-brm_cohocrit = brm(formula = crit_resp ~ Gear_cap:Method_cap
+covars = c("Gear_cap","Method_cap")
+modname = "gearmethod"
+formula = formula(crit_resp ~ Gear_cap:Method_cap)
+if(!file.exists(paste0("results/coho_crithook_model_",modname,".rds"))){
+brm_cohocrit = brm(formula = formula
           ,data=cdat_treat
           ,family = bernoulli(link="logit")
           #,method = "REML"
@@ -697,17 +701,22 @@ brm_cohocrit = brm(formula = crit_resp ~ Gear_cap:Method_cap
           ,iter=2000
           #,thin = 5
           ,warmup = 1000
-          #,control = list(adapt_delta = .98)
-          ,prior = prior(horseshoe(df = 1), class = "b")
+          ,control = list(adapt_delta = .98)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
     )
+ 
+saveRDS(brm_cohocrit, file = paste0("results/coho_crithook_model_",modname,".rds"))
 
-summary(brm_cohocrit)  
-saveRDS(brm_cohocrit, file = "results/coho_crithook_model.rds")
+}else{
+  brm_cohocrit = readRDS(paste0("results/coho_crithook_model_",modname,".rds"))
+}
+
+summary(brm_cohocrit)
 
 mod_effplots = plot(conditional_effects(brm_cohocrit), points = T, ask = F)
 
 
-cov_comb = covComb(cdat_treat, c("Gear_cap", "Method_cap"))%>%
+cov_comb = covComb(dat=cdat_treat, covars)%>%
   filter(Gear_cap != "Control")
 comb_names = apply(cov_comb, 1, paste, collapse = "_")
 
@@ -718,7 +727,7 @@ meff = brmsmargins(brm_cohocrit,
                    seed = 425
                    )
 
-meff_dist = as.tibble(meff$Posterior)
+meff_dist = as_tibble(meff$Posterior)
 colnames(meff_dist) = comb_names
 list = grep("*Control*", comb_names, invert = T, value = T)
 
@@ -740,7 +749,7 @@ meff_quant = surv_dist %>%
   ) %>%
   ungroup()
 
-save(mod_effplots, meff_quant,file = "results/coho_crithook_model_gearmethod.rda")
+save(mod_effplots, meff_quant,file = paste0("results/coho_crithook_model_",modname,".rds"))
 ```
 
 ```{r Coho-data-summaries}

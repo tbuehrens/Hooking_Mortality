@@ -12,7 +12,7 @@ ind.fun = function(x){
 covComb = function(dat=cdat, covars=covars){
   
   if(length(covars) > 1){
-    level = cdat %>%
+    level = dat %>%
       dplyr::select(all_of(covars)) %>%
       apply(2,unique) %>%
       #as.tibble() %>%
@@ -23,7 +23,7 @@ covComb = function(dat=cdat, covars=covars){
       dplyr::select(-ind)
     
   }else{
-    out = cdat %>%
+    out = dat %>%
       dplyr::select(all_of(covars)) %>%
       apply(2,unique)
   }
