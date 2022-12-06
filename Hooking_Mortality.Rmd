@@ -689,7 +689,7 @@ cdat_treat = cdat %>%
   mutate(crit_resp = ifelse(CritHook_cap == "Critical", 1, 0))
 
 covars = c("Gear_cap","Method_cap")
-modname = "gearmethod"
+modname = "gear"
 formula = formula(crit_resp ~ Gear_cap:Method_cap)
 if(!file.exists(paste0("results/coho_crithook_model_",modname,".rds"))){
 brm_cohocrit = brm(formula = formula
@@ -708,7 +708,7 @@ brm_cohocrit = brm(formula = formula
 saveRDS(brm_cohocrit, file = paste0("results/coho_crithook_model_",modname,".rds"))
 
 }else{
-  brm_cohocrit = readRDS(paste0("results/coho_crithook_model_",modname,".rds"))
+  brm_cohocrit = read_rds(paste0(here::here(),"/results/coho_crithook_model_",modname,".rds"))
 }
 
 summary(brm_cohocrit)
@@ -750,13 +750,6 @@ meff_quant = surv_dist %>%
   ungroup()
 
 save(mod_effplots, meff_quant,file = paste0("results/coho_crithook_model_",modname,".rds"))
-```
-
-```{r Coho-data-summaries}
-cdat = dat%>%
-  filter(SpeciesCode_cap=="COHO")
-
-
 ```
 
 # GAM analysis of factors affecting prob of recapture for Summer Steelhead
@@ -966,7 +959,8 @@ cdat = dat %>%
 
 modname = c("treatmentfish_full")[1]
 priorname = c("norm","hs", "hs_secondaryeffs")[2]
-re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')",
+       "s(RKM_cap, run_year_cap, bs = 'fs')")
 covars = c(treatvars[-c(1,2,8,11)], "CritHook_cap", "FL_cm_cap", "Temp_C_cap")
 cov_form = c(treatvars[-c(1,2,8,11)],"CritHook_cap", "FL_cm_cap", "Temp_C_cap")
 formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
@@ -1198,14 +1192,6 @@ barb_preds%>%
   kable_classic(full_width = F, html_font = "Cambria")
 ```
 
-```{r BRMS-W-steelhead}
-cdat = dat %>%
-  filter(SpeciesCode_cap=="WSTLHD")
-
-
-
-```
-
 ```{r BRMS-W-steelhead-treatmentonly}
 cdat = dat %>%
   filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap %in% c("Treatment"))
@@ -1236,6 +1222,7 @@ saveRDS(brm_wsthd, file = paste0(here::here(),"/results/","WinterSTHD_", modname
 }else{
   brm_wsthd<-readRDS(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))
 }
+summary(brm_wsthd)
 
 mod_effplots = plot(conditional_effects(brm_wsthd), points = T, ask = F)
 ```
