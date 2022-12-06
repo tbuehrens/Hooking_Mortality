@@ -1,0 +1,2265 @@
+---
+title: "Cowlitz Hooking Mortality Results"
+author: "Mark Roes, Thomas Buehrens"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_caption: yes
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+<!-- Load Functions -->
+```{r load functions, results = "hide",echo = F, message = FALSE, warning = FALSE}
+wd_functions<-"functions"
+sapply(FUN = source, paste(wd_functions, list.files(wd_functions), sep="/"))
+```
+
+<!-- Load Packages -->
+```{r load packages, results = "hide",echo = F, message = FALSE, warning = FALSE}
+packages_list<-c("tidyverse","magrittr","lubridate","scales","RODBC","MuMIn","RColorBrewer","reshape2","gplots","mgcv","sjPlot","sjmisc","gridExtra","modelr","kableExtra","dataRetrieval","MASS","brms","rstan","sf","riverdist","maptools","rgdal","raster","rgeos","devtools","webshot","phantom","marginaleffects", "brmsmargins", "here") 
+install_or_load_pack(pack = packages_list)
+```
+
+<!-- Load Data -->
+```{r load data, results = "hide",echo = F, message = FALSE, warning = FALSE}
+#only read data from DB if not already in data.rds
+if(!file.exists("data.rds")){
+  #locations from table
+  location.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="Location Index", fields= "*")%>%
+    as_tibble()%>%
+    mutate(lat=ifelse(!is.na(Loc_Lat),Loc_Lat,(US_Lat + DS_Lat)/2),
+           lon=ifelse(!is.na(Loc_Lon),Loc_Lon,(US_Lon + DS_Lon)/2)
+           )%>%
+    filter(!is.na(lat))%>%
+    dplyr::select(`Location Name`,lat,lon)
+  
+  points.dec = SpatialPoints(cbind(location.df$lon, location.df$lat), proj4string=CRS("+proj=longlat"))
+  
+  #cowlitz flow line shape file
+  river.sh<-st_read("WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp")
+  points.plot <- data.frame(spTransform(points.dec, crs(river.sh)))%>%
+    dplyr::rename(lon=coords.x1,lat=coords.x2)
+  
+  #Map river with locations
+  ggplot() + 
+    geom_sf(data = river.sh, size = 1, color = "black", fill = "cyan1") + 
+    ggtitle("Cowlitz River & Hooking Mortality Study Locations") + 
+    coord_sf()+
+    geom_point(data=points.plot,mapping=aes(x=lon,y=lat),color="red",size=2)
+  
+  river_sp<-readShapeLines(
+    fn="WA_Hydrography_-_NHD_Flowline/WA_Hydrography_-_NHD_Flowline.shp",
+    proj4string=CRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs ")
+    , verbose=FALSE
+    ,repair=FALSE
+    ,delete_null_obj=FALSE
+    )
+  
+  river<-line2network(
+    sp = river_sp,
+    path = ".",
+    layer = NA,
+    tolerance = 100,
+    reproject = NULL,
+    supplyprojection = NULL
+  )
+  
+  river_2<-setmouth(seg=354, vert=1, rivers=river)
+  #showends(seg=354,rivers=river)
+  
+  
+  points.UTM <- spTransform(points.dec, crs(river_sp))
+  points<-xy2segvert(x=points.UTM$coords.x1,y=points.UTM$coords.x2,rivers=river_2)
+  
+  #plot(river)
+  #riverpoints(seg=points$seg, vert=points$vert, rivers=river, pch=15,col="blue")
+  
+  RKM<-mouthdistbysurvey(
+    unique=1:dim(points)[1],
+    survey=rep(1,dim(points)[1]),
+    seg=points$seg,
+    vert=points$vert,
+    rivers = river_2,
+    logical = NULL,
+    stopiferror = TRUE,
+    algorithm = NULL
+  )/1000
+  
+  location.df<-location.df%>%
+    bind_cols(RKM=RKM)
+  
+  
+  # all captures
+  capture.df<-odbc(accdb.name="CowlitzHookingMortalityDB.accdb",db.dir=getwd(),dsn="MS Access Database", sqtable="All Captures Query", fields= "*")%>%
+    as_tibble()%>%
+    mutate(
+      Year = as.numeric(year(ymd(as.character(Survey_Date)))),
+      Month = as.numeric(month(ymd(as.character(Survey_Date)))),
+      jdate = as.numeric(julian(ymd(as.character(Survey_Date)))),
+      DOY = as.numeric(yday(ymd(as.character(Survey_Date)))),
+      Capture_Type = ifelse(Capcode=="0", "No_Captures",
+                                   ifelse(Capcode=="1", "New_Fish",
+                                      ifelse(Capcode=="2", "Recapture",
+                                        ifelse(Capcode=="3", "Natural_Origin",
+                                          ifelse(Capcode=="5", "New_Fish","Lost"))))), #all variants of Capcode 4 were lost (we may want to differentiate for some analyses)
+       #define initial capture as a control or treatment
+      Treatment = ifelse(Survey_type%in%c("Control Release TP","Control Release MHE","Control Recycle"), "Control",
+                                  ifelse(Survey_type=="Angling", "Treatment","Other")),
+      run_year = as.numeric(ifelse(as.numeric(Year=="2017")&as.numeric(Month>8)&SpeciesCode=="COHO","2017",
+                                 ifelse(as.numeric(Year=="2018")&as.numeric(Month<5)&SpeciesCode=="COHO","2017",
+                                        ifelse(as.numeric(Year=="2018")&as.numeric(Month>8)&SpeciesCode=="COHO","2018",
+                                               ifelse(as.numeric(Year=="2019")&as.numeric(Month<5)&SpeciesCode=="COHO","2018",
+                                                      ifelse(as.numeric(Year=="2019")&as.numeric(Month>8)&SpeciesCode=="COHO","2019",
+                                                             ifelse(as.numeric(Year=="2020")&as.numeric(Month<5)&SpeciesCode=="COHO","2019",
+                                                                    ifelse(as.numeric(Year=="2017")&SpeciesCode=="STLHD","2017",
+                                                                           ifelse(as.numeric(Year=="2018")&SpeciesCode=="STLHD","2018",
+                                                                                  ifelse(as.numeric(Year=="2019")&SpeciesCode=="STLHD","2019",
+                                                                                         ifelse(as.numeric(Year=="2020")&as.numeric(Month<2)&SpeciesCode=="STLHD","2019",
+                                                                                                ifelse(as.numeric(Year=="2020")&as.numeric(Month>2)&SpeciesCode=="STLHD","2020",as.numeric(Year))))))))))))
+    ))%>%left_join(location.df,by=c(Release_Location="Location Name"))
+    
+  #only first captures that were new fish (T or C)
+  firstcapture = capture.df%>%
+    filter(Capcode=="1"|Capcode =="5") #these are initial captures and excludes Capcode 3s and 4s
+  
+  #only first recaptures
+  recapture = capture.df%>%
+    filter(Capcode=="2")%>%
+    group_by(Fish_ID)%>%
+    arrange(Survey_Date,TimeCapture)%>%
+    slice(1L) #get first data/time recapure for each fish ID
+    
+  #merge capture-recapture & create dummy variable for recaptures
+  dat<-firstcapture%>%
+    left_join(recapture, by="Fish_ID",suffix=c("_cap","_recap"))%>%
+    mutate(rec=ifelse(!is.na(DOY_recap),1,0),
+           time = round(julian(Survey_Date_recap)-julian(Survey_Date_cap))
+           )#join first captures with first recaptures
+  saveRDS(dat,"data.rds")
+}else{
+  dat<-readRDS("data.rds")
+}
+```
+
+<!-- Data Management -->
+```{r data-management-for-analysis, results = "hide",echo = F, message = FALSE, warning = FALSE}
+catvars = dat %>%
+  dplyr::select(Gear_cap:AnglerCode_cap, HookLeftinFish_cap) %>%
+  names() %>%
+  c("CritHook_cap", "HookType_reduced", "Method_reduced", "Method_Gear")
+
+contvars = dat %>%
+  dplyr::select(HandlingTime_seconds_cap, FightTime_seconds_cap, FL_cm_cap) %>%
+  names()
+
+Gear_lookup<-tibble(Gear_LU=c("Bait","Lure","Jig","Fly","Baited Lure"),Gear_cap=c("B","L","J","F","BL"))
+
+Method_lookup = tibble(Method_LU=c("Bobber","Bobberdog","Backtroll","Cast Gear","Cast Jig", "Drift"),Method_cap=c("B","BD","BT","CG","CJ","D"))
+
+# dat %<>%
+dat %<>%
+  filter(Treatment_cap %in% c("Control","Treatment"))%>%
+  mutate(time= ifelse(!is.na(time),time,max(time,na.rm=T)))%>%
+  filter(time > 0)%>%
+  left_join(Gear_lookup)%>%
+  dplyr::select(-Gear_cap)%>%
+  dplyr::rename(Gear_cap=Gear_LU)%>%
+  left_join(Method_lookup)%>%
+  dplyr::select(-Method_cap)%>%
+  dplyr::rename(Method_cap=Method_LU) %>%
+  mutate(run_year_cap = factor(run_year_cap),
+         Treatment_cap = factor(Treatment_cap)
+         )%>%
+  mutate(CritHook_cap = ifelse(HookLocation_cap %in% c("G","E","T","S"), "Critical","NonCritical"),
+  HookType_reduced = ifelse(HookType_cap %in% c("Double","Treble"),"Multiple","Single"),
+  Method_reduced = ifelse(Method_cap %in% c("Cast Gear","Cast Jig"), "Cast", ifelse(Method_cap %in% c("Bobberdog","Drift"), "Drift", Method_cap)),
+  Method_Gear = ifelse(is.na(Method_reduced) | is.na(Gear_cap), NA,
+    paste(Method_reduced, Gear_cap, sep = "_"))
+  ) %>%
+  dplyr::mutate(across(all_of(catvars), ~ ifelse(Treatment_cap == "Control", "Control",.))) %>%
+  mutate(across(all_of(catvars), ~ fct_relevel(.,"Control",after=0)))%>%
+  mutate(across(all_of(contvars), ~ as.numeric(.)))
+  #mutate(FightTime_seconds_cap = as.numeric(ifelse(FightTime_seconds_cap == "Control", 0, FightTime_seconds_cap))
+         #,Temp_C_cap = as.numeric(ifelse(Temp_C_cap == "Control", 0, Temp_C_cap))
+
+```
+
+## Data summaries
+```{r data-summaries, results = "hold", echo = F, message = FALSE, warning = FALSE}
+sampsize = dat %>%
+  filter(SpeciesCode_cap %in% c("COHO", "SCHK", "WSTLHD", "STLHD")) 
+
+#sample size
+sampsize %>%
+  group_by(SpeciesCode_cap, Treatment_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  rename(Species = SpeciesCode_cap,
+         Type = Treatment_cap) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Total fish included in the study") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+sampsize %>%
+  group_by(SpeciesCode_cap, Year_cap, Treatment_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  rename(Species = SpeciesCode_cap,
+         Year = Year_cap,
+         Type = Treatment_cap) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Total fish included in the study") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+#Gear & barb by species
+sampsize %>%
+  filter(Treatment_cap == "Treatment") %>%
+  group_by(SpeciesCode_cap, Gear_cap, Barb_cap) %>%
+  dplyr::summarize(Count= n_distinct(Fish_ID)) %>%
+  rename(Gear = Gear_cap,
+         Species = SpeciesCode_cap,
+         `Barbed Hook` = Barb_cap) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Total treatment fish angled by gear type") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+#Method by species
+sampsize %>%
+  filter(Treatment_cap == "Treatment") %>%
+  group_by(SpeciesCode_cap, Method_cap) %>%
+  dplyr::summarize(Count= n_distinct(Fish_ID)) %>%
+  rename(`Angling Method` = Method_cap,
+         Species = SpeciesCode_cap) %>%
+  kable(booktabs = T,
+        align = "ccl",
+        caption = "Total treatment fish angled by angling method") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+
+#Time to recapture by species, and treatment/control
+ttr_fig = dat %>%
+  filter(SpeciesCode_cap %in% c("COHO","SCHK","WSTLHD","STLHD") & Treatment_cap == "Treatment") %>%
+  mutate(Days_atlarge = Survey_Date_recap - Survey_Date_cap ) %>%
+  ggplot(aes(Days_atlarge)) +
+  geom_bar()+
+  scale_x_continuous(breaks = c(1,seq(10,180,by = 20)))+
+  facet_wrap(~SpeciesCode_cap, scales = "free")
+
+ttr_fig
+
+tiff(paste0(here(),'/figures/time_to_recovery_fig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+ttr_fig
+dev.off()
+```
+# Model results  
+**NOTE: Red points on figures indicate mean values and are intended to illustrate the difference between median and mean values**
+
+## Coho
+
+### Full model
+
+```{r BRMS analysis Coho, results="hide",echo = F, message = T, warning = FALSE}
+
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly"))#F
+
+cdat %<>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = ifelse(Treatment_cap == "Treatment", stdGelman(filter(cdat, Treatment_cap == "Treatment")$FightTime_seconds_cap), 0),
+    HandlingTime_std = ifelse(Treatment_cap == "Treatment", stdGelman(filter(cdat, Treatment_cap == "Treatment")$HandlingTime_seconds_cap), 0)
+  )
+
+#Model run and output process
+#Designate model name
+modname = c("DraftFull")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c("Treatment_cap", "Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+cov_form = c("Treatment_cap", "Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+ 
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))){
+
+brm_coho = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+#save results
+saveRDS(brm_coho, file = paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))
+}else{
+  brm_coho<-readRDS(paste0(here::here(),"/results/","coho_", modname,"_",priorname,".rds"))
+}
+
+#data summaries, predictions, tables, figures
+if(!file.exists(paste0(here::here(),"/results/", "coho_", modname, "_", priorname, "_outputs", ".rda"))){
+mod_effplots = plot(conditional_effects(brm_coho), points = T, ask = F)
+
+#Marginal effects using brmsmargins
+#generate df of effects
+
+# cov_comb = covComb(cdat, c("CritHook_cap", "Method_cap", "HookType_cap"), type = 'observed')
+#comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+cov_comb = tibble(CritHook_cap = c("Control",rep("Critical",6), rep("NonCritical",6)), Barb_cap = c("Control",rep(c(rep("No", 3),rep("Yes",3)),2)), HandlingTime_std = c(0,rep(c(-1,0,1),4)))
+
+comb_names = tibble(a=c("Control",rep("Critical",6), rep("NonCritical",6)),
+                    b=c("",rep(c(rep("NoBarb",3),rep("Barb",3)),2)),
+                    c=c("",rep(c("ShortHandle_30secs","","LongHandle_190secs"),4))) %>%
+  apply(1, paste, collapse = "_")
+
+#calc marginal effects
+meff = brmsmargins(brm_coho, 
+                   at = cov_comb,
+                   effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+  dplyr::rename(control = contains("Control")) %>%
+  mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(mean = mean(surv),
+                   median = quantile(surv, .5),
+                   q95.l = quantile(surv, .025),
+                   q95.u = quantile(surv,.975),
+                   q90.l = quantile(surv, .05),
+                   q90.u = quantile(surv, .95),
+                   q80.l = quantile(surv, .1),
+                   q80.u = quantile(surv, .9)
+  ) %>%
+  ungroup()
+  
+save(file = paste0(here::here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"),
+     list = intersect(ls(),c("meff_dist",
+                             "surv_dist",
+                      "surv_quant",
+                      "mod_effplots"
+                      )))
+
+}else{
+  load(paste0(here::here(),"/results/","coho_",modname,"_",priorname,"_outputs",".rda"))
+}
+
+
+#Make figures ----
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_coho, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-.05,.025))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/coho_fullmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/coho_fullmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+#Reduced figures
+rankfig_reduced = post %>%
+  filter(name %in% c("CritHook_Critical", "HandlingTime")) %>%
+  mutate(order = fct_reorder(name, value, .fun="median")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-.01,.005))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+coho_summary = summary(brm_coho)
+
+brm_coho_effplots = mod_effplots
+```
+
+```{r Coho-fullmodel-results1, results="hold",echo = F, message = T, warning = FALSE}
+rankfig
+
+# bind_rows(cdat %>%
+#             filter(CritHook_cap == "Critical") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Critical Hook Location",
+#                    `Negative effect probability` = filter(pod_dat, name == "CritHook_Critical")$p.neg),
+#           cdat %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Handling time",
+#                    `Negative effect probability` = filter(pod_dat, name == "HandlingTime")$p.neg),
+#           cdat %>%
+#             filter(Method_cap == "Bobber") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Method: Bobber",
+#                    `Negative effect probability` = filter(pod_dat, name == "Method_B")$p.neg),
+#           cdat %>%
+#             filter(Gear_cap == "Bait") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Gear: Bait",
+#                    `Negative effect probability` = filter(pod_dat, name == "Gear_Bait")$p.neg),
+#           cdat %>%
+#             filter(Barb_cap == "Yes") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Barbed Hook",
+#                    `Negative effect probability` = filter(pod_dat, name == "Method_BD")$p.neg),
+#           cdat %>%
+#             filter(Method_cap == "Drift") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Method: Drift",
+#                    `Negative effect probability` = filter(pod_dat, name == "Method_BD")$p.neg),
+#           cdat %>%
+#             filter(HookSize_cap == "1/O") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Hook Size: 1/O",
+#                    `Negative effect probability` = filter(pod_dat, name == "HookSize_1DO")$p.neg),
+#           cdat %>%
+#             filter(HookType_cap == "Double") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Hook Type: Double",
+#                    `Negative effect probability` = filter(pod_dat, name == "HookType_Double")$p.neg)
+# ) %>%
+#   dplyr::select(Category, Count, `Negative effect probability`) %>%
+#   kable(booktabs = T,
+#         caption = "Sample size and probability of negative effect for a selection of covariates") %>%
+#   kable_styling(position = "center",
+#                 bootstrap_options = c("striped", "condensed"))
+
+
+```
+
+```{r Coho-fullmodel-results2, results="hold",echo = F, message = T, warning = FALSE, eval = F }
+rankfig_reduced
+
+surv_quant %>%
+  kable(booktabs = T,
+        caption = "Estimated relative survival given hook location (critical/noncritical) and handling time") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+```
+
+```{r Coho-fullmodel-results3, results="hold",echo = F, message = T, warning = FALSE}
+pod
+
+rm(list = intersect(ls(),c("brm_coho",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "rankfig_reduced",
+                           "pod",
+                           "pod_dat"
+                      )))
+```
+
+### Regulatory model
+```{r Coho-regmodel, results="hide",echo = F, message = T, warning = FALSE}
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly"))
+
+#Model run and output process
+#Designate model name
+modname = c("regulatory")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c("Treatment_cap", "Gear_cap","HookType_reduced", "Barb_cap")
+cov_form = c("Treatment_cap", "Gear_cap","HookType_reduced", "Barb_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+ 
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","coho_Draft", modname,"_",priorname,".rds"))){
+
+brm_coho = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .9)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+          #,prior = prior(normal(0,4), class = "b")#Test on more restricted prior
+    )
+
+#save results
+saveRDS(brm_coho, file = paste0(here::here(),"/results/","coho_Draft", modname,"_",priorname,".rds"))
+}else{
+  brm_coho<-readRDS(paste0(here::here(),"/results/","coho_Draft", modname,"_",priorname,".rds"))
+}
+
+if(!file.exists(paste0(here::here(),"/results/","coho_Draft",modname,"_",priorname,"_outputs",".rda"))){
+
+mod_effplots = plot(conditional_effects(brm_coho), points = T, ask = F)
+
+#Effects table
+#cov_comb = covComb(cdat, covars, type = 'observed')
+
+#comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+cov_comb = tibble(Barb_cap = c("Control","Yes","No",rep("Yes",2),rep("No",2)),
+                  Gear_cap = c("Control","Bait","Bait",rep(c("Jig", "Lure"),2)),
+                  HookType_reduced = c("Control","Multiple", "Single",rep("Multiple",2),rep("Single",2)))
+
+comb_names = c("Control","Open season", "Barbless bait",rep("No bait",2),rep("Selective gear",2))
+
+#calc marginal effects
+meff = brmsmargins(brm_coho, 
+                   at = cov_comb,
+                   effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+  dplyr::rename(control = contains("Control")) %>%
+  mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(mean = mean(surv),
+                   median = quantile(surv, .5),
+                   q95.l = quantile(surv, .025),
+                   q95.u = quantile(surv,.975),
+                   q90.l = quantile(surv, .05),
+                   q90.u = quantile(surv, .95),
+                   q80.l = quantile(surv, .1),
+                   q80.u = quantile(surv, .9)
+  ) %>%
+  ungroup()
+
+save(file = paste0(here::here(),"/results/","coho_Draft",modname,"_",priorname,"_outputs",".rda"),
+     list = intersect(ls(),c("meff_dist",
+                      "surv_quant",
+                      "mod_effplots"
+                      )))
+
+}else{
+  load(paste0(here::here(),"/results/","coho_Draft",modname,"_",priorname,"_outputs",".rda"))
+}
+
+#Make figures ----
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_coho, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-.02,.02))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/coho_regmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000) %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/coho_regmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+
+coho_reg_summary = summary(brm_coho)
+
+coho_reg_effplots = mod_effplots
+
+
+
+```
+
+```{r Coho-regmodel-results, results="hold",echo = F, message = T, warning = FALSE}
+rankfig
+pod
+
+surv_quant %>%
+  kable(booktabs = T,
+        caption = "Estimated relative survival given hook location (critial/noncritical) and handling time") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+  
+rm(list = intersect(ls(),c("brm_coho",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "pod"
+                      )))
+```
+
+### Critical hooking location model
+```{r Coho-crithook-model-gearmethod, results="hide",echo = F, message = T, warning = FALSE}
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly"))
+
+cdat_treat = cdat %>%
+  filter(Treatment_cap == "Treatment") %>%
+  mutate(crit_resp = ifelse(CritHook_cap == "Critical", 1, 0))
+
+covars = c("Method_Gear")
+modname = "methodgear"
+formula = formula(crit_resp ~ Method_Gear)
+if(!file.exists(paste0("results/coho_crithook_Draft_",modname,".rds"))){
+brm_cohocrit = brm(formula = formula
+          ,data=cdat_treat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .98)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+ 
+saveRDS(brm_cohocrit, file = paste0("results/coho_crithook_Draft_",modname,".rds"))
+
+}else{
+  brm_cohocrit = read_rds(paste0(here::here(),"/results/coho_crithook_Draft_",modname,".rds"))
+}
+
+if(!file.exists(paste0("results/coho_crithook_Draft_",modname,"_outputs.rda"))){
+  
+mod_effplots = plot(conditional_effects(brm_cohocrit), points = T, ask = F)
+
+#Create all cov combs, filter to those that exist in data
+
+cov_comb = covComb(dat=cdat_treat, covars=covars, type = 'observed')
+comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+#calc marginal effects
+meff = brmsmargins(brm_cohocrit, 
+                   at = cov_comb,
+                   #effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as_tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = comb_names) %>%
+  #dplyr::rename(control = contains("Control")) %>%
+  #mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+meff_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(mean = mean(value),
+                   med = quantile(value, .5),
+            q95.l = quantile(value, .025),
+            q95.u = quantile(value,.975),
+            q90.l = quantile(value, .05),
+            q90.u = quantile(value, .95),
+            q80.l = quantile(value, .1),
+            q80.u = quantile(value, .9)
+  ) %>%
+  ungroup()
+
+save(mod_effplots, surv_dist, meff_quant,file = paste0("results/coho_crithook_Draft_",modname,"_outputs.rda"))
+
+}else{
+  load(paste0("results/coho_crithook_Draft_",modname,"_outputs.rda"))
+}
+
+#Figures
+#Probability of Critical hook given gear & method
+
+critfig = surv_dist %>%
+  mutate(order = fct_reorder(name, value, .fun="median")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  labs(x = "Gear type and fishing method", y = "Probability of critical hooking location")
+
+tiff(paste0(here(),'/figures/coho_crithook_critprob.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+critfig
+dev.off()
+
+crithook_summary = summary(brm_cohocrit)
+
+crithook_effplots = mod_effplots
+
+```
+
+```{r Coho-crithook-model-gearmethod-results, results="hold",echo = F, message = T, warning = FALSE}
+critfig
+
+meff_quant %>%
+  kable(booktabs = T,
+        caption = "Probability of critical hooking location given gear type and fishing method") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+rm(list = intersect(ls(),c("brm_cohocrit",
+                           "meff",
+                           "meff_dist",
+                           "surv_dist",
+                           "meff_quant",
+                           "mod_effplots",
+                           "critfig"
+                      )))
+```
+
+### Handling time model
+```{r Coho-handling-model, results="hide",echo = F, message = T, warning = FALSE, fig.keep = 'none'}
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="COHO")%>%
+  filter(!Gear_cap%in%c("Baited Lure","Fly"))
+
+cdat_treat = cdat %>%
+  filter(Treatment_cap == "Treatment") %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0),
+         HookType_reduced = fct_relevel(HookType_reduced, "Single", after=0))
+
+covars = c("CritHook_cap", "Barb_cap", "HookType_reduced")
+re = c("(1|survey_ID_cap)")
+modname = "Handle"
+formula = formula(HandlingTime_seconds_cap ~ (1|survey_ID_cap) + CritHook_cap + Barb_cap + HookType_reduced)
+if(!file.exists(paste0("results/coho_handlingtime_Draft_",modname,".rds"))){
+brm_cohohand = brm(formula = formula
+          ,data=cdat_treat
+          ,family = gaussian(link="identity")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          #,control = list(adapt_delta = .9)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+ 
+saveRDS(brm_cohohand, file = paste0("results/coho_handlingtime_Draft_",modname,".rds"))
+
+}else{
+  brm_cohohand = read_rds(paste0(here::here(),"/results/coho_handlingtime_Draft_",modname,".rds"))
+}
+
+if(!file.exists(paste0("results/coho_handlingtime_Draft_",modname,"_outputs.rda"))){
+  
+mod_effplots = plot(conditional_effects(brm_cohohand), points = T, ask = F)
+
+meff = bind_cols(brmsmargins(brm_cohohand,
+                        at = tibble(Barb_cap = c("No","Yes")),
+                        effects = "fixedonly",
+                        CI = .95)$Posterior %>%
+                   as.tibble() %>%
+                     rename(Barbless_hook = V1,
+                            Barbed_hook = V2), 
+                 brmsmargins(brm_cohohand,
+                        at = tibble(CritHook_cap = c("NonCritical","Critical")),
+                        effects = "fixedonly",
+                        CI = .95)$Posterior %>%
+                         as.tibble() %>%
+                   rename(NonCritical_hook = V1,
+                          Critical_hook = V2),
+                 brmsmargins(brm_cohohand,
+                        at = tibble(HookType_reduced = c("Single","Multiple")),
+                        effects = "fixedonly",
+                        CI = .95)$Posterior %>%
+                         as.tibble() %>%
+                   rename(Singlehook = V1,
+                          Multiplehook = V2)) %>%
+  pivot_longer(cols = everything()) %>%
+  group_by(name) %>%
+  dplyr::summarise(mean = mean(value),
+                   med = median(value)) %>%
+  ungroup() %>%
+  mutate(avghandle = mean(cdat_treat$HandlingTime_seconds_cap, na.rm = T)) %>%
+  mutate(mean_eff = round(mean - avghandle,1),
+         med_eff = round(med - avghandle,1),
+         med = round(med,1)) %>%
+  dplyr::select(name, med, med_eff) %>%
+  rename(` ` = name,
+         `Handling time` = med,
+         `Effect on handling time (seconds)` = med_eff)
+  
+
+save(mod_effplots, meff,
+     file = paste0("results/coho_handlingtime_Draft_",modname,"_outputs.rda"))
+
+}else{
+  load(paste0("results/coho_handlingtime_Draft_",modname,"_outputs.rda"))
+}
+
+handle_effplots = mod_effplots
+handle_summary = summary(brm_cohohand)
+
+```
+
+```{r Coho-handling-model-results, results="hold",echo = F, message = T, warning = FALSE}
+
+meff %>%
+  kable(booktabs = T,
+        caption = "Predicted handling times (mean handling time = 95 seconds)") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+rm(list = intersect(ls(),c("brm_cohohand",
+                           "meff",
+                           "mod_effplots"
+                      )))
+
+```
+
+## Spring Chinook
+```{r BRMS full-model SCHK, results="hide",echo = F, message = T, warning = FALSE }
+
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="SCHK") %>%
+  filter(run_year_cap == 2018
+         & RKM_cap >115
+         )
+
+cdat %<>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = ifelse(Treatment_cap == "Treatment", stdGelman(filter(cdat, Treatment_cap == "Treatment")$FightTime_seconds_cap), 0),
+    HandlingTime_std = ifelse(Treatment_cap == "Treatment", stdGelman(filter(cdat, Treatment_cap == "Treatment")$HandlingTime_seconds_cap), 0)
+  )
+
+#Model run and output process
+#Designate model name
+modname = c("DraftFull")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c("Treatment_cap", "Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+cov_form = c("Treatment_cap", "Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+  
+
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))){
+
+brm_schk = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .95)
+          ,prior = prior(horseshoe(df=1, par_ratio = .5), class = "b")
+    )
+ #save results
+saveRDS(brm_schk, file = paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))
+}else{
+  brm_schk<-readRDS(paste0(here::here(),"/results/","schk_", modname,"_",priorname,".rds"))
+}
+
+#data summaries, predictions, tables, figures
+
+if(!file.exists(paste0(here::here(),"/results/", "schk_", modname, "_", priorname, "_outputs", ".rda"))){
+mod_effplots = plot(conditional_effects(brm_schk), points = T, ask = F)
+
+#Marginal effects using brmsmargins
+#generate df of effects
+
+cov_comb = covComb(cdat, c("Treatment_cap"), type = 'observed')
+comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+#calc marginal effects
+meff = brmsmargins(brm_schk, 
+                   at = cov_comb,
+                   effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+  rename(control = starts_with("Control")) %>%
+  mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  summarize(mean = mean(surv),
+            med = quantile(surv, .5),
+            q95.l = quantile(surv, .025),
+            q95.u = quantile(surv,.975),
+            q90.l = quantile(surv, .05),
+            q90.u = quantile(surv, .95),
+            q80.l = quantile(surv, .1),
+            q80.u = quantile(surv, .9)
+  ) %>%
+  ungroup()
+
+save(mod_effplots, surv_dist, surv_quant, 
+     file=paste0(here::here(),"/results/", "schk_", modname, "_", priorname, "_outputs", ".rda"))
+
+}else{
+  load(paste0(here::here(),"/results/", "schk_", modname, "_", priorname, "_outputs", ".rda"))
+}
+
+#Make figures
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_schk, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  coord_cartesian(ylim = c(-0.45,.3))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/schk_fullmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/schk_fullmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+#Reduced figures
+# rankfig_reduced = post %>%
+#   filter(name %in% c("Treatment_Treatment","Gear_Lure","HookType_Treble","Method_CG", "Barb_Yes","HookSize_2")) %>%
+#   mutate(order = fct_reorder(name, value, .fun="median")) %>%
+#   ggplot(aes(order, value))+
+#   geom_boxplot(outlier.shape = NA)+
+#   #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+#   stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+#   #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+#   coord_cartesian(ylim = c(-0.1,.05))+
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+#   labs(y = "Posterior effect size")
+
+
+#outputs
+schk_summary = summary(brm_schk)
+schk_effplots = mod_effplots
+
+
+```
+
+```{r BRMS analysis SCHK results1, results="hold",echo = F, message = T, warning = FALSE }
+rankfig
+
+# bind_rows(cdat %>%
+#             filter(Treatment_cap == "Treatment") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Treatment fish",
+#                    `Negative effect probability` = filter(pod_dat, name == "Treatment_Treatment")$p.neg),
+#           cdat %>%
+#             filter(Gear_cap == "Lure") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Gear: Lure",
+#                    `Negative effect probability` = filter(pod_dat, name == "Gear_Lure")$p.neg),
+#           cdat %>%
+#             filter(HookType_cap == "Treble") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Hook: Treblehook",
+#                    `Negative effect probability` = filter(pod_dat, name == "HookType_Treble")$p.neg),
+#           cdat %>%
+#             filter(HookSize_cap == "2") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Hook Size: 2",
+#                    `Negative effect probability` = filter(pod_dat, name == "HookSize_2")$p.neg),
+#           cdat %>%
+#             filter(Method_cap == "Cast") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Method: Cast Gear",
+#                    `Negative effect probability` = filter(pod_dat, name == "Method_CG")$p.neg),
+#           cdat %>%
+#             filter(Barb_cap == "Yes") %>%
+#             dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+#             mutate(Category = "Barbed Hook",
+#                    `Negative effect probability` = filter(pod_dat, name == "Barb_Yes")$p.neg)
+#           
+# ) %>%
+#   dplyr::select(Category, Count, `Negative effect probability`) %>%
+#   kable(booktabs = T,
+#         caption = "Sample size and probability of negative effect for candidate covariates") %>%
+#   kable_styling(position = "center",
+#                 bootstrap_options = c("striped", "condensed"))
+
+
+```
+
+```{r BRMS analysis SCHK results2, results="hold",echo = F, message = T, warning = FALSE}
+#rankfig_reduced
+
+surv_quant %>%
+  kable(booktabs = T,
+        caption = "Estimated relative survival given treatment (angling)") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+```
+
+```{r BRMS analysis SCHK results3, results="hold",echo = F, message = T, warning = FALSE}
+pod
+
+rm(list = intersect(ls(),c("brm_schk",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "pod",
+                           "pod_dat"
+                      )))
+```
+
+### Regulatory model
+```{r SCHK-regmodel, results="hide",echo = F, message = T, warning = FALSE}
+cdat<-dat%>%
+  filter(SpeciesCode_cap=="SCHK") %>%
+  filter(run_year_cap == 2018
+         & RKM_cap >115
+         )
+
+#Model run and output process
+#Designate model name
+modname = c("regulatory")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')")
+covars = c("Treatment_cap", "Gear_cap", "HookType_reduced", "Barb_cap")
+cov_form = c("Treatment_cap", "Gear_cap", "HookType_reduced", "Barb_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+ 
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","schk_Draft", modname,"_",priorname,".rds"))){
+
+brm_schk = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .95)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+          #,prior = prior(normal(0,4), class = "b")#Test on more restricted prior
+    )
+
+#save results
+saveRDS(brm_schk, file = paste0(here::here(),"/results/","schk_Draft", modname,"_",priorname,".rds"))
+}else{
+  brm_schk<-readRDS(paste0(here::here(),"/results/","schk_Draft", modname,"_",priorname,".rds"))
+}
+
+if(!file.exists(paste0(here::here(),"/results/","schk_Draft",modname,"_",priorname,"_outputs",".rda"))){
+
+mod_effplots = plot(conditional_effects(brm_schk), points = T, ask = F)
+
+#Effects table
+#cov_comb = covComb(cdat, covars, type = 'observed')
+
+#comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+cov_comb = tibble(Barb_cap = c("Control","Yes","No","Yes","No"),
+                  Gear_cap = c("Control","Bait","Bait","Lure","Lure"),
+                  HookType_reduced = c("Control","Multiple", "Single", "Multiple","Single"))
+
+comb_names = c("Control","Open season", "Barbless bait","No bait","Selective gear")
+
+#calc marginal effects
+meff = brmsmargins(brm_schk, 
+                   at = cov_comb,
+                   effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+  dplyr::rename(control = contains("Control")) %>%
+  mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(mean = mean(surv),
+                   median = quantile(surv, .5),
+                   q95.l = quantile(surv, .025),
+                   q95.u = quantile(surv,.975),
+                   q90.l = quantile(surv, .05),
+                   q90.u = quantile(surv, .95),
+                   q80.l = quantile(surv, .1),
+                   q80.u = quantile(surv, .9)
+  ) %>%
+  ungroup()
+
+save(file = paste0(here::here(),"/results/","schk_Draft",modname,"_",priorname,"_outputs",".rda"),
+     list = intersect(ls(),c("meff_dist",
+                      "surv_quant",
+                      "mod_effplots"
+                      )))
+
+}else{
+  load(paste0(here::here(),"/results/","schk_Draft",modname,"_",priorname,"_outputs",".rda"))
+}
+
+#Make figures ----
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_schk, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-1,1))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/schk_regmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000) %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/schk_regmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+
+schk_reg_summary = summary(brm_schk)
+
+schk_reg_effplots = mod_effplots
+
+
+
+```
+
+```{r SCHK-regmodel-outputs, results = "hold", echo = F, message = T, warning = F}
+rankfig
+pod
+
+surv_quant %>%
+  kable(booktabs = T,
+        caption = "Estimated relative survival given various gear and hook types.") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+  
+rm(list = intersect(ls(),c("brm_schk",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "pod"
+                      )))
+
+```
+
+## Combined Steelhead
+```{r BRMS analysis steelhead-combined, results="hide",echo = F, message = T, warning = FALSE}
+
+cdat = dat %>%
+  filter(SpeciesCode_cap %in% c("STLHD", "WSTLHD") & Treatment_cap %in% c("Treatment")) %>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = stdGelman(FightTime_seconds_cap),
+    HandlingTime_std = stdGelman(HandlingTime_seconds_cap)
+  ) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0),
+         Gear_cap = fct_relevel(Gear_cap, "Jig", after=0),
+         Gear_Method = fct_relevel(Method_Gear, "Bobber_Jig", after=0),
+         HookType_reduced = fct_relevel(HookType_reduced, "Single", after=0),
+         RunType = as.factor(ifelse(SpeciesCode_cap == "STLHD","Summer","Winter")))
+
+#Model run and output process
+#Designate model name
+modname = c("DraftFull")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap, by = RunType, bs='fs')", "s(RKM_cap, run_year_cap, by = RunType, bs='fs')")
+covars = c("Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+cov_form = c("Method_Gear", "HookType_reduced", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+ 
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))){
+
+brm_sthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          #,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+#save results
+saveRDS(brm_sthd, file = paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))
+}else{
+  brm_sthd<-readRDS(paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))
+}
+
+#data summaries, predictions, tables, figures
+if(!file.exists(paste0(here::here(),"/results/", "sthd_comb", modname, "_", priorname, "_outputs", ".rda"))){
+mod_effplots = plot(conditional_effects(brm_sthd), points = T, ask = F)
+
+#Marginal effects using brmsmargins
+#generate df of effects
+
+# cov_comb = covComb(cdat, c("CritHook_cap", "Method_cap", "HookType_cap"), type = 'observed')
+#comb_names = apply(cov_comb, 1, paste, collapse = "_")
+
+# cov_comb = tibble(CritHook_cap = c("Control",rep("Critical",6), rep("NonCritical",6)), Barb_cap = c("Control",rep(c(rep("No", 3),rep("Yes",3)),2)), HandlingTime_std = c(0,rep(c(-1,0,1),4)))
+# 
+# comb_names = tibble(a=c("Control",rep("Critical",6), rep("NonCritical",6)),
+#                     b=c("",rep(c(rep("NoBarb",3),rep("Barb",3)),2)),
+#                     c=c("",rep(c("ShortHandle_30secs","","LongHandle_190secs"),4))) %>%
+#   apply(1, paste, collapse = "_")
+# 
+# #calc marginal effects
+# meff = brmsmargins(brm_coho, 
+#                    at = cov_comb,
+#                    effects = "integrateoutRE",
+#                    seed = 425
+#                    )
+# 
+# meff_dist = as.tibble(meff$Posterior)
+# colnames(meff_dist) = comb_names
+# list = grep("*Control*", comb_names, invert = T, value = T)
+# 
+# surv_dist = pivot_longer(meff_dist, cols = list ) %>%
+#   dplyr::rename(control = contains("Control")) %>%
+#   mutate(surv = value/control) %>%
+#   expandNames(covars, sep = "_")
+# 
+# 
+# surv_quant = surv_dist %>%
+#   group_by(name) %>%
+#   dplyr::summarize(mean = mean(surv),
+#                    median = quantile(surv, .5),
+#                    q95.l = quantile(surv, .025),
+#                    q95.u = quantile(surv,.975),
+#                    q90.l = quantile(surv, .05),
+#                    q90.u = quantile(surv, .95),
+#                    q80.l = quantile(surv, .1),
+#                    q80.u = quantile(surv, .9)
+#   ) %>%
+#   ungroup()
+  
+save(file = paste0(here::here(),"/results/","sthd_comb",modname,"_",priorname,"_outputs",".rda"),
+     list = intersect(ls(),c("meff_dist",
+                             "surv_dist",
+                      "surv_quant",
+                      "mod_effplots"
+                      )))
+
+}else{
+  load(paste0(here::here(),"/results/","sthd_comb",modname,"_",priorname,"_outputs",".rda"))
+}
+
+
+#Make figures ----
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_sthd, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-.125,.075))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/sthd_combfullmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/sthd_combfullmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+#Reduced figures
+# rankfig_reduced = post %>%
+#   filter(name %in% c("CritHook_Critical", "HandlingTime")) %>%
+#   mutate(order = fct_reorder(name, value, .fun="median")) %>%
+#   ggplot(aes(order, value))+
+#   geom_boxplot(outlier.shape = NA)+
+#   #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+#   stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+#   #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+#   #coord_cartesian(ylim = c(-0.025,.02))+
+#   coord_cartesian(ylim = c(-.01,.005))+
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+#   labs(y = "Posterior effect size")
+
+sthdcomb_summary = summary(brm_sthd)
+
+brm_sthdcomb_effplots = mod_effplots
+```
+
+```{r BRMS analysis steelhead-combined-results, results = "hold", echo = F, message = T, warning = FALSE, fig.cap = "Estimated posterior effects and probability of direction. Reference level is  a steelhead caught with a single hook jig on a bobber, hooked in a noncritical location."}
+
+rankfig
+pod
+
+rm(list = intersect(ls(),c("brm_sthd",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "pod"
+                      )))
+
+```
+
+### Regulatory model
+```{r BRMS analysis steelhead-regmodel, results="hide",echo = F, message = T, warning = FALSE}
+
+cdat = dat %>%
+  filter(SpeciesCode_cap %in% c("STLHD", "WSTLHD") & Treatment_cap %in% c("Treatment")) %>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = stdGelman(FightTime_seconds_cap),
+    HandlingTime_std = stdGelman(HandlingTime_seconds_cap)
+  ) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0),
+         Gear_cap = fct_relevel(Gear_cap, "Jig", after=0),
+         HookType_reduced = fct_relevel(HookType_reduced, "Single", after=0),
+         RunType = as.factor(ifelse(SpeciesCode_cap == "STLHD","Summer","Winter")))
+
+#Model run and output process
+#Designate model name
+modname = c("regulatory")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap, by = RunType, bs='fs')", "s(RKM_cap, run_year_cap, by = RunType, bs='fs')")
+covars = c("Gear_cap", "HookType_reduced", "Barb_cap")
+cov_form = c("Gear_cap", "HookType_reduced", "Barb_cap")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+ 
+#Check if this model permutation has been run, and if so load the output
+if(!file.exists(paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))){
+
+brm_sthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          #,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+#save results
+saveRDS(brm_sthd, file = paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))
+}else{
+  brm_sthd<-readRDS(paste0(here::here(),"/results/","sthd_comb", modname,"_",priorname,".rds"))
+}
+
+#data summaries, predictions, tables, figures
+if(!file.exists(paste0(here::here(),"/results/", "sthd_comb", modname, "_", priorname, "_outputs", ".rda"))){
+mod_effplots = plot(conditional_effects(brm_sthd), points = T, ask = F)
+
+#Marginal effects using brmsmargins
+#generate df of effects
+
+cov_comb = tibble(Barb_cap = c("Yes","No",rep("Yes",3),rep("No",3)),
+                  Gear_cap = c("Bait","Bait",rep(c("Fly","Jig", "Lure"),2)),
+                  HookType_reduced = c("Multiple", "Single",rep("Multiple",3),rep("Single",3)))
+
+comb_names = c("Open season", "Barbless bait",rep("No bait",3),rep("Selective gear",3))
+
+#calc marginal effects
+meff = brmsmargins(brm_sthd, 
+                   at = cov_comb,
+                   effects = "integrateoutRE",
+                   seed = 425
+                   )
+
+meff_dist = as.tibble(meff$Posterior)
+colnames(meff_dist) = comb_names
+#list = grep("*Control*", comb_names, invert = T, value = T)
+
+surv_dist = pivot_longer(meff_dist, cols = comb_names ) %>%
+  #dplyr::rename(control = contains("Control")) %>%
+  #mutate(surv = value/control) %>%
+  expandNames(covars, sep = "_")
+
+
+surv_quant = surv_dist %>%
+  group_by(name) %>%
+  dplyr::summarize(mean = mean(value),
+                   median = quantile(value, .5),
+                   q95.l = quantile(value, .025),
+                   q95.u = quantile(value,.975),
+                   q90.l = quantile(value, .05),
+                   q90.u = quantile(value, .95),
+                   q80.l = quantile(value, .1),
+                   q80.u = quantile(value, .9)
+  ) %>%
+  ungroup()
+  
+save(file = paste0(here::here(),"/results/","sthd_comb",modname,"_",priorname,"_outputs",".rda"),
+     list = intersect(ls(),c("meff_dist",
+                             "surv_dist",
+                      "surv_quant",
+                      "mod_effplots"
+                      )))
+
+}else{
+  load(paste0(here::here(),"/results/","sthd_comb",modname,"_",priorname,"_outputs",".rda"))
+}
+
+
+#Make figures ----
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_sthd, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  #coord_cartesian(ylim = c(-0.025,.02))+
+  coord_cartesian(ylim = c(-.075,.055))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/sthd_combreg_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/sthd_combreg_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+sthdcomb_reg_summary = summary(brm_sthd)
+
+brm_sthdcomb_reg_effplots = mod_effplots
+```
+
+```{r BRMS analysis steelhead-regmodel-results1, results="hold",echo = F, message = T, warning = FALSE, fig.cap = "Estimated posterior effects and probability of direction. Reference level is a steelhead caught with a single hook jig."}
+
+rankfig
+pod
+
+```
+
+```{r BRMS analysis steelhead-regmodel-results2, results="hold",echo = F, message = T, warning = FALSE}
+
+surv_quant %>%
+  kable(booktabs = T,
+        caption = "Estimated recovery probability given various gear and hook types.") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+  
+rm(list = intersect(ls(),c("brm_schk",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "pod"
+                      )))
+
+```
+
+## Winter Steelhead
+```{r BRMS-W-steelhead-treatmentonly, results="hide",echo = F, message = T, warning = FALSE, eval = F}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap %in% c("Treatment")) %>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = stdGelman(FightTime_seconds_cap),
+    HandlingTime_std = stdGelman(HandlingTime_seconds_cap)
+  ) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0))
+
+
+# re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')",
+#        "s(RKM_cap, run_year_cap, bs = 'fs')")
+
+modname = c("treatfish_Draftfull")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')",
+       "s(RKM_cap, run_year_cap, bs='fs', k = 5)")
+covars = c("Gear_cap", "Method_cap", "HookSize_cap", "HookType_cap", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+cov_form = c("Gear_cap", "Method_cap", "HookSize_cap", "HookType_cap", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+
+# beta_covs = get_prior(formula = formula
+#                       ,data=cdat
+#                       ,family = bernoulli(link="logit")) %>%
+#   filter(class == "b") %>%
+#   as.data.frame() %>%
+#   dplyr::select(coef)
+
+if(!file.exists(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))){
+
+brm_wsthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+saveRDS(brm_wsthd, file = paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))
+}else{
+  brm_wsthd<-readRDS(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,".rds"))
+}
+
+if(!file.exists(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,"_outputs.rds"))){
+
+mod_effplots = plot(conditional_effects(brm_wsthd), points = T, ask = F)
+
+#Create all cov combs, filter to those that exist in data
+#
+# cov_comb = covComb(dat=cdat_treat, covars=covars, type = 'observed')%>%
+#   filter(Gear_cap != "Control")
+# comb_names = apply(cov_comb, 1, paste, collapse = "_")
+#
+# #calc marginal effects
+# meff = brmsmargins(brm_cohocrit,
+#                    at = cov_comb,
+#                    #effects = "integrateoutRE",
+#                    seed = 425
+#                    )
+#
+# meff_dist = as_tibble(meff$Posterior)
+# colnames(meff_dist) = comb_names
+# list = grep("*Control*", comb_names, invert = T, value = T)
+#
+# surv_dist = pivot_longer(meff_dist, cols = comb_names) %>%
+#   #dplyr::rename(control = contains("Control")) %>%
+#   #mutate(surv = value/control) %>%
+#   expandNames(covars, sep = "_")
+#
+#
+# meff_quant = surv_dist %>%
+#   group_by(name) %>%
+#   dplyr::summarize(mean = mean(value),
+#                    med = quantile(value, .5),
+#             q95.l = quantile(value, .025),
+#             q95.u = quantile(value,.975),
+#             q90.l = quantile(value, .05),
+#             q90.u = quantile(value, .95),
+#             q80.l = quantile(value, .1),
+#             q80.u = quantile(value, .9)
+#   ) %>%
+#   ungroup()
+
+save(mod_effplots, file = paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,"_outputs.rds"))
+
+}else{
+  load(paste0(here::here(),"/results/","WinterSTHD_", modname,"_",priorname,"_outputs.rds"))
+}
+
+
+#Make figures
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_wsthd, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  coord_cartesian(ylim = c(-0.2,.25))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/wsthd_fullmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/wsthd_fullmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+#Reduced figures
+rankfig_reduced = post %>%
+  filter(name %in% c("Method_BD","Gear_Fly","HandlingTime")) %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  coord_cartesian(ylim = c(-0.05,.02))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+#Outputs ----
+wsthd_summary = summary(brm_wsthd)
+wsthd_effplots = mod_effplots
+```
+
+```{r BRMS-W-steelhead-treatmentonly-results1, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+rankfig
+
+bind_rows(cdat %>%
+            filter(Method_cap == "Drift") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Method: Drift",
+                   `Negative effect probability` = filter(pod_dat, name == "Method_BD")$p.neg),
+          cdat %>%
+            filter(HookSize_cap == "2/O") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Hook Size: 2/O",
+                   `Negative effect probability` = filter(pod_dat, name == "HookSize_2DO")$p.neg),
+          cdat %>%
+            filter(Gear_cap == "Fly") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Gear: Fly",
+                   `Negative effect probability` = filter(pod_dat, name == "Gear_Fly")$p.neg),
+          cdat %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Handling time",
+                   `Negative effect probability` = filter(pod_dat, name == "HandlingTime")$p.neg),
+          cdat %>%
+            filter(Barb_cap == "Yes") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Barbed Hook",
+                   `Negative effect probability` = filter(pod_dat, name == "Barb_Yes")$p.neg)
+
+) %>%
+  dplyr::select(Category, Count, `Negative effect probability`) %>%
+  kable(booktabs = T,
+        caption = "Sample size and probability of negative effect for candidate covariates") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+```
+
+```{r BRMS-W-steelhead-treatmentonly-results2, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+rankfig_reduced
+pod
+rm(list = intersect(ls(),c("brm_wsthd",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "rankfig_reduced",
+                           "pod",
+                           "pod_dat"
+                      )))
+```
+
+```{r W-steelhead-data-summaries, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="WSTLHD" & Treatment_cap %in% c("Treatment")) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0))
+
+
+#Sample sizes
+cdat %>%
+  group_by(Gear_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Sample size by gear") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+cdat %>%
+  group_by(Gear_cap, Method_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Sample size by gear and method") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+```
+
+## Summer Steelhead
+```{r BRMS-S-steelhead-treatmentonly, results="hide",echo = F, message = T, warning = FALSE, eval = F}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="STLHD" & Treatment_cap %in% c("Treatment")) %>%
+  mutate(
+    Temp_std = stdGelman(Temp_C_cap),
+    FL_std = stdGelman(FL_cm_cap),
+    FightTime_std = stdGelman(FightTime_seconds_cap),
+    HandlingTime_std = stdGelman(HandlingTime_seconds_cap)
+  ) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0))
+
+modname = c("treatfish_Draftfull")[1]
+priorname = c("hs")[1]
+re = c("(1| survey_ID_cap)", "s(DOY_cap,run_year_cap,bs='fs')",
+       "s(RKM_cap, run_year_cap, bs='fs', k = 5)")
+covars = c("Gear_cap", "Method_cap", "HookSize_cap", "HookType_cap", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+cov_form = c("Gear_cap", "Method_cap", "HookSize_cap", "HookType_cap", "Barb_cap", "HookLeftinFish_cap", "CritHook_cap", "Temp_std", "FL_std", "FightTime_std", "HandlingTime_std")
+formula = bf((paste('rec ~ 1 + ', paste(re, collapse = ' + '),'+', paste(cov_form, collapse = ' + '))))
+
+# beta_covs = get_prior(formula = formula
+#                       ,data=cdat
+#                       ,family = bernoulli(link="logit")) %>%
+#   filter(class == "b") %>%
+#   as.data.frame() %>%
+#   dplyr::select(coef)
+
+if(!file.exists(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))){
+
+brm_sthd = brms::brm(formula = formula
+          ,data=cdat
+          ,family = bernoulli(link="logit")
+          #,method = "REML"
+          ,cores = 4
+          ,chains=4
+          ,iter=2000
+          #,thin = 5
+          ,warmup = 1000
+          ,control = list(adapt_delta = .99)
+          ,prior = prior(horseshoe(df = 1, par_ratio = 0.5), class = "b")
+    )
+
+saveRDS(brm_sthd, file = paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))
+}else{
+  brm_sthd<-readRDS(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,".rds"))
+}
+
+if(!file.exists(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,"_outputs.rds"))){
+
+
+mod_effplots = plot(conditional_effects(brm_sthd), points = T, ask = F)
+
+save(mod_effplots, file = paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,"_outputs.rds"))
+
+}else{
+  load(paste0(here::here(),"/results/","SummerSTHD_", modname,"_",priorname,"_outputs.rds"))
+}
+
+#Make figures
+#set ggplot theme
+theme_set(theme_bw()+
+            theme(panel.grid.major.x = element_blank(),
+                  panel.grid.minor.x = element_blank(),
+                  panel.grid.minor.y = element_blank()))
+
+#All covs ranked - using posteriors from model fits
+
+post = posterior_samples(brm_sthd, "^b") %>%
+  rename_with(~str_remove(.,'b_')) %>%
+  rename_with(~str_remove(.,'cap')) %>%
+  rename_with(~str_remove(.,'_std')) %>%
+  dplyr::select(-Intercept) %>%
+  pivot_longer(cols = everything())
+
+#Effect size
+rankfig = post %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  coord_cartesian(ylim = c(-0.1,.1))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+tiff(paste0(here(),'/figures/ssthd_fullmodel_rankfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+rankfig
+dev.off()
+
+#Prob of direction
+pod_dat = post %>%
+  mutate(pos = ifelse(value > 0,1,0),
+         neg = ifelse(value < 0,1,0)) %>%
+  group_by(name) %>%
+  dplyr::summarise(p.pos = sum(pos)/4000,
+                   p.neg = sum(neg)/4000)
+
+pod = pod_dat %>%
+  mutate(name = fct_reorder(name,p.neg, .desc = T)) %>%
+  ggplot(aes(name,p.neg))+
+  geom_point()+
+  geom_hline(aes(yintercept = 0.5),linetype = "dashed", alpha = 0.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())+
+  labs(y = "Probability of negative effect")
+
+tiff(paste0(here(),'/figures/ssthd_fullmodel_PoDfig.tiff'), res = 300, compression = 'lzw', width = 6.5, height = 5, units = 'in')
+pod
+dev.off()
+
+#Reduced figures
+rankfig_reduced = post %>%
+  filter(name %in% c("Method_BT","Method_BD","Temp")) %>%
+  mutate(order = fct_reorder(name, value, .fun="mean")) %>%
+  ggplot(aes(order, value))+
+  geom_boxplot(outlier.shape = NA)+
+  #geom_violin(alpha = .8, color = "grey50", fill = "grey50")+
+  stat_summary(fun.y=mean, geom="point", size = 2, color = "red")+
+  #stat_summary(fun.y=median, geom="point", size = 2, shape = 8, color = "blue")+
+  coord_cartesian(ylim = c(-0.01,.01))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank())+
+  labs(y = "Posterior effect size")
+
+#Outputs----
+sthd_summary = summary(brm_sthd)
+sthd_effplots = mod_effplots
+
+```
+
+```{r BRMS-S-steelhead-treatmentonly-results1, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+rankfig
+
+bind_rows(cdat %>%
+            filter(Method_cap == "Backtroll") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Method: Backtroll",
+                   `Negative effect probability` = filter(pod_dat, name == "Method_BT")$p.neg),
+          cdat %>%
+            filter(Method_cap == "Drift") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Method: Drift",
+                   `Negative effect probability` = filter(pod_dat, name == "Method_BD")$p.neg),
+          cdat %>%
+            filter(HookSize_cap == "4") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Hook Size: 4",
+                   `Negative effect probability` = filter(pod_dat, name == "HookSize_4")$p.neg),
+          cdat %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Increased temperature",
+                   `Negative effect probability` = filter(pod_dat, name == "Temp")$p.neg),
+          cdat %>%
+            filter(HookSize_cap == "2/O") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Hook Size: 2/O",
+                   `Negative effect probability` = filter(pod_dat, name == "HookSize_2DO")$p.neg),
+          cdat %>%
+            filter(Barb_cap == "Yes") %>%
+            dplyr::summarise(Count = n_distinct(Fish_ID)) %>%
+            mutate(Category = "Barbed Hook",
+                   `Negative effect probability` = filter(pod_dat, name == "Barb_Yes")$p.neg)
+
+) %>%
+  dplyr::select(Category, Count, `Negative effect probability`) %>%
+  kable(booktabs = T,
+        caption = "Sample size and probability of negative effect for candidate covariates") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+```
+
+```{r BRMS-S-steelhead-treatmentonly-results2, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+rankfig_reduced
+pod
+
+rm(list = intersect(ls(),c("brm_sthd",
+                           "meff",
+                           "meff_dist",
+                           "surv_quant",
+                           "mod_effplots",
+                           "post",
+                           "rankfig",
+                           "rankfig_reduced",
+                           "pod",
+                           "pod_dat"
+                      )))
+```
+
+```{r S-steelhead-data-summaries, results="hold",echo = F, message = T, warning = FALSE, eval = F}
+cdat = dat %>%
+  filter(SpeciesCode_cap=="STLHD" & Treatment_cap %in% c("Treatment")) %>%
+  mutate(CritHook_cap = fct_relevel(CritHook_cap,"NonCritical",after=0))
+
+#Sample sizes
+cdat %>%
+  group_by(Barb_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Sample size barb/barbless") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+cdat %>%
+  group_by(HookLeftinFish_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Sample size with hooks left in fish") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+cdat %>%
+  group_by(Gear_cap, Method_cap) %>%
+  dplyr::summarize(Count = n_distinct(Fish_ID)) %>%
+  kable(booktabs = T,
+        align = "cccl",
+        caption = "Sample size by gear and method") %>%
+  kable_styling(position = "center",
+                bootstrap_options = c("striped", "condensed"))
+
+
+```
+
+## Raw model outputs
+
+### Coho
+
+#### Full model
+```{r cohofull-outputs, results = "hold", echo =F, message = T, warning= F}
+coho_summary
+brm_coho_effplots
+```
+
+#### Regulatory model
+```{r cohored-outputs, results = "hold", echo =F, message = T, warning= F}
+coho_reg_summary
+coho_reg_effplots
+```
+
+#### Critical hooking model
+```{r crithook-outputs, results = "hold", echo =F, message = T, warning= F}
+crithook_summary
+crithook_effplots
+```
+
+#### Handling time model
+```{r handling-outputs, results = "hold", echo =F, message= T, warning = F}
+handle_summary
+handle_effplots
+```
+
+### Spring Chinook
+```{r schk-outputs, results = "hold", echo =F, message = T, warning= F}
+schk_summary
+schk_effplots
+```
+
+#### Regulatory model
+```{r schk-reg-outputs, results = "hold", echo =F, message = T, warning= F}
+schk_reg_summary
+schk_reg_effplots
+```
+
+### Steelhead combined
+```{r sthd-outputs, results = "hold", echo = F, message = T, warning = F}
+sthdcomb_summary
+brm_sthdcomb_effplots
+```
+
+#### Regulatory model
+```{r sthd-reg-outputs, results = "hold", echo = F, message = T, warning = F}
+sthdcomb_reg_summary
+brm_sthdcomb_reg_effplots
+```
+
+### Winter Steelhead
+```{r wsthd-outputs, results = "hold", echo =F, message = T, warning= F, eval = F}
+wsthd_summary
+wsthd_effplots
+```
+
+### Summer Steelhead
+```{r summersthd-outputs, results = "hold", echo =F, message = T, warning= F, eval = F}
+sthd_summary
+sthd_effplots
+```
