@@ -870,25 +870,32 @@ meff = bind_cols(brmsmargins(brm_cohohand,
                          as.tibble() %>%
                    rename(Singlehook = V1,
                           Multihook = V2)) %>%
+  mutate(barb_eff = Barbed_hook - Barbless_hook,
+         crit_eff = Critical_hook - NonCritical_hook,
+         multihook_eff = Multihook - Singlehook) %>%
+  dplyr::select(barb_eff, crit_eff, multihook_eff) %>%
   pivot_longer(cols = everything()) %>%
+  mutate(pos = ifelse(value > 0, 1,0)) %>%
   group_by(name) %>%
   dplyr::summarise(mean = mean(value),
                    med = median(value),
                    hdi_95l = HDInterval::hdi(value,.95)[1],
-                   hdi_95u = HDInterval::hdi(value,.95)[2]) %>%
+                   hdi_95u = HDInterval::hdi(value,.95)[2],
+                   p.pos = sum(pos)/4000) %>%
   ungroup() %>%
-  mutate(avghandle = mean(cdat_treat$HandlingTime_seconds_cap, na.rm = T)) %>%
-  mutate(mean_eff = round(mean - avghandle,1),
-         med_eff = round(med - avghandle,1),
-         med = round(med,1),
-         hdi_95l = round(hdi_95l - avghandle,1),
-         hdi_95u = round(hdi_95u - avghandle,1)) %>%
-  dplyr::select(name, med, med_eff, hdi_95l, hdi_95u) %>%
+  # mutate(avghandle = mean(cdat_treat$HandlingTime_seconds_cap, na.rm = T)) %>%
+  # mutate(mean_eff = round(mean - avghandle,1),
+  #        med_eff = round(med - avghandle,1),
+  #        med = round(med,1),
+  #        hdi_95l = round(hdi_95l - avghandle,1),
+  #        hdi_95u = round(hdi_95u - avghandle,1)) %>%
+  dplyr::select(name, med, mean, hdi_95l, hdi_95u, p.pos) %>%
   rename(` ` = name,
-         `Handling time` = med,
-         `Effect on handling time (seconds)` = med_eff,
+         `Median effect on handling time (seconds)` = med,
+         `Mean effect on handling time (seconds)` = mean,
          `95% HDI, lower` = hdi_95l,
-         `95% HDI, upper` = hdi_95u)
+         `95% HDI, upper` = hdi_95u,
+         `P(positive)` = p.pos)
   
 
 save(mod_effplots, meff,
