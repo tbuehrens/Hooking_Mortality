@@ -9,14 +9,24 @@ ind.fun = function(x){
   return(out)
 }
 
-covComb = function(dat=cdat, covars=covars){
+covComb = function(dat=NULL, covars=NULL, type = c('observed','all')){
   
   if(length(covars) > 1){
+    
+    if(type == "observed"){
+    level = dat %>%
+      dplyr::select(all_of(covars)) %>%
+      distinct() %>%
+      droplevels()
+  }
+  
+  if(type == 'all'){
     level = dat %>%
       dplyr::select(all_of(covars)) %>%
       apply(2,unique) %>%
       #as.tibble() %>%
       cross_df()
+  }
       
     out = ind.fun(level) %>%
       filter(ind == 0 | ind == ncol(level)) %>%
